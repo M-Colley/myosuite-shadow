@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10"]
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install ${{ matrix.python }}
+      - run: uv venv --python ${{ matrix.python }}
+      # Pulls MyoSuite from the branch named in pyproject.toml.
+      - run: uv pip install -e ".[test]"
+      - run: uv run --no-sync python -m pytest
+      - run: uv run --no-sync python -m ruff check src tests benchmarks
+      - run: uv run --no-sync python -m ruff format --check src tests
+      - name: Benchmarks still run
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        run: |
+          uv run --no-sync python benchmarks/fatigue_hold.py
+          uv run --no-sync python benchmarks/delay_accuracy.py --duration 4

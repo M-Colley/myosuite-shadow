@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myosuite-shadow"
+dynamic = ["version"]
+description = "Live muscle activation and fatigue estimates beside an experiment, built on MyoSuite"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Mark Colley" }]
+keywords = ["musculoskeletal", "static optimization", "fatigue", "MuJoCo", "MyoSuite", "user studies"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "numpy>=1.24",
+  "mujoco>=3.3,<4",
+  # The physics stack (live kinematics, static optimization with ground reactions and
+  # per-frame activation bounds) is under review in MyoHub/myosuite (#635-#640).
+  # Switch to a release once it is merged.
+  "myosuite @ git+https://github.com/MyoHub/myosuite.git@feat/shadow-model",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "ruff==0.4.4"]
+
+[project.urls]
+Homepage = "https://github.com/M-Colley/myosuite-shadow"
+Repository = "https://github.com/M-Colley/myosuite-shadow"
+Issues = "https://github.com/M-Colley/myosuite-shadow/issues"
+
+[project.scripts]
+myosuite-shadow = "myosuite_shadow.cli:main"
+
+[tool.hatch.version]
+path = "src/myosuite_shadow/__init__.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myosuite_shadow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["myosuite_shadow"]

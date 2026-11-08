@@ -1,0 +1,74 @@
+cff-version: 1.2.0
+message: "If you use myosuite-shadow, please cite it and the MyoSuite paper (references)."
+title: "myosuite-shadow: live muscle estimates beside an experiment"
+type: software
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/M-Colley/myosuite-shadow"
+authors:
+  - family-names: Colley
+    given-names: Mark
+keywords:
+  - musculoskeletal simulation
+  - static optimization
+  - muscle fatigue
+  - MuJoCo
+  - MyoSuite
+  - user studies
+references:
+  - type: conference-paper
+    title: "MyoSuite -- A contact-rich simulation suite for musculoskeletal motor control"
+    authors:
+      - family-names: Caggiano
+        given-names: Vittorio
+      - family-names: Wang
+        given-names: Huawei
+      - family-names: Durandau
+        given-names: Guillaume
+      - family-names: Sartori
+        given-names: Massimo
+      - family-names: Kumar
+        given-names: Vikash
+    collection-title: "Learning for Dynamics and Control (L4DC)"
+    year: 2022
+    doi: 10.48550/arXiv.2205.13600
+  - type: article
+    title: "Modification of a three-compartment muscle fatigue model to predict peak torque decline during intermittent tasks"
+    authors:
+      - family-names: Looft
+        given-names: John M.
+      - family-names: Herkert
+        given-names: Nicole
+      - family-names: Frey-Law
+        given-names: Laura
+    journal: "Journal of Biomechanics"
+    volume: 77
+    start: 16
+    end: 25
+    year: 2018
+  - type: article
+    title: "A physiologically based criterion of muscle force prediction in locomotion"
+    authors:
+      - family-names: Crowninshield
+        given-names: Roy D.
+      - family-names: Brand
+        given-names: Richard A.
+    journal: "Journal of Biomechanics"
+    volume: 14
+    issue: 11
+    start: 793
+    end: 801
+    year: 1981
+  - type: article
+    title: "Static and dynamic optimization solutions for gait are practically equivalent"
+    authors:
+      - family-names: Anderson
+        given-names: Frank C.
+      - family-names: Pandy
+        given-names: Marcus G.
+    journal: "Journal of Biomechanics"
+    volume: 34
+    issue: 2
+    start: 153
+    end: 161
+    year: 2001
