@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 from myosuite_shadow import ShadowModel, ShadowModelConfig, read_session
-from myosuite_shadow.log import model_sha256, package_provenance
+from myosuite_shadow.flags import Flag
+from myosuite_shadow.log import ESTIMATE_COLUMNS, model_sha256, package_provenance
 
 
 def _record_session(model: mujoco.MjModel, log_dir: Path, **kwargs):
@@ -35,9 +36,10 @@ def test_log_records_every_frame(elbow: mujoco.MjModel, tmp_path: Path) -> None:
     header, rows = rows[0], rows[1:]
     assert len(rows) == sum(f is not None for f in frames) == 26
     names = [elbow.actuator(i).name for i in range(elbow.nu)]
-    assert header[5:] == [f"a_{n}" for n in names] + [f"mf_{n}" for n in names] + [
-        f"contact_{body}_{x}" for x in "xyz"
-    ]
+    assert header[: len(ESTIMATE_COLUMNS)] == ESTIMATE_COLUMNS
+    assert header[len(ESTIMATE_COLUMNS) :] == [f"a_{n}" for n in names] + [
+        f"mf_{n}" for n in names
+    ] + [f"contact_{body}_{x}" for x in "xyz"]
     assert all(len(r) == len(header) for r in rows)
     record = json.loads((tmp_path / "record.json").read_text(encoding="utf-8"))
     assert record["model_sha256"] == model_sha256(elbow)
@@ -52,7 +54,14 @@ def test_session_reads_back_exactly(elbow: mujoco.MjModel, tmp_path: Path) -> No
     frames = [f for f in frames if f is not None]
     s = read_session(tmp_path)
     np.testing.assert_array_equal(s.time, [f.state.time for f in frames])
-    np.testing.assert_array_equal(s.latest_time, [f.latest_time for f in frames])
+    np.testing.assert_array_equal(
+        s.columns["latest_time"], [f.latest_time for f in frames]
+    )
+    np.testing.assert_array_equal(
+        s.columns["frame_unix"], [f.frame_unix for f in frames]
+    )
+    assert (s.columns["done_unix"] >= s.columns["frame_unix"]).all()
+    np.testing.assert_array_equal(s.flags, [int(f.flags) for f in frames])
     np.testing.assert_array_equal(
         s.activation, [f.optimization.activation for f in frames]
     )
@@ -109,3 +118,33 @@ def test_provenance_records_versions() -> None:
     p = package_provenance(("numpy", "not-a-package-xyz"))
     assert p["numpy"]["version"] == np.__version__
     assert p["not-a-package-xyz"] == {"version": None}
+
+
+def test_events_and_wall_clock_times(elbow: mujoco.MjModel, tmp_path: Path) -> None:
+    with ShadowModel(elbow, ShadowModelConfig(window=5), log_dir=tmp_path) as shadow:
+        shadow.mark("session_start", condition="B")
+        for k in range(10):
+            flags = Flag.LOW_CONFIDENCE if k == 3 else Flag.NONE
+            shadow.push(
+                k / 20, np.array([1.2]), flags=flags, capture_unix=1000.0 + k / 20
+            )
+        shadow.mark("set_end", set=1, unix=2000.0)
+    s = read_session(tmp_path)
+    assert [e["label"] for e in s.events] == ["session_start", "set_end"]
+    assert s.events[0]["session_time"] is None and s.events[1]["session_time"] == 0.45
+    assert s.events[0]["data"] == {"condition": "B"} and s.events[1]["unix"] == 2000.0
+    np.testing.assert_array_equal(
+        s.input_columns["capture_unix"], 1000 + np.arange(10) / 20
+    )
+    assert s.input_columns["flags"][3] == Flag.LOW_CONFIDENCE
+    # Each estimate is stamped with its own frame's capture time (lag 2 frames).
+    np.testing.assert_allclose(s.columns["frame_unix"], 1000 + s.time)
+    assert s.checkpoint["closed"]
+
+
+def test_a_session_directory_is_not_overwritten(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    ShadowModel(elbow, log_dir=tmp_path).close()
+    with pytest.raises(FileExistsError, match="resume"):
+        ShadowModel(elbow, log_dir=tmp_path)

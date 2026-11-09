@@ -1,4 +1,10 @@
-"""Command line: ``myosuite-shadow replay``.
+"""Command line: ``myosuite-shadow replay | report | sensitivity``.
+
+``report --session DIR`` prints the session's quality report (and ``--json``
+writes it); ``sensitivity --session DIR --out DIR`` replays the session under
+calibration errors (see :mod:`myosuite_shadow.sensitivity`).
+
+``replay``
 
 Streams poses one at a time through :class:`~myosuite_shadow.ShadowModel`, as
 a tracker would, and prints the delay, update cost, solver status count and
@@ -18,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,6 +35,8 @@ import numpy as np
 from myosuite_shadow.log import MODEL, read_session
 from myosuite_shadow.motions import add_tracking_noise, reaching_motion
 from myosuite_shadow.pipeline import ShadowFrame, ShadowModel, ShadowModelConfig
+from myosuite_shadow.report import format_report, session_report
+from myosuite_shadow.sensitivity import DEFAULT_VARIANTS, Variant, run_sensitivity
 
 _DEFAULT_ENV = "myoArmReachRandom-v0"
 
@@ -90,13 +99,11 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
     else:
         model = session.load_model(args.session)
 
-    external = None
+    external, flags = None, None
     if session is not None:
-        times, qpos, external = (
-            session.input_time,
-            session.input_qpos,
-            session.input_qfrc,
-        )
+        times, qpos = session.input_time, session.input_qpos
+        external = session.input_qfrc
+        flags = session.input_columns["flags"].astype(int)
         base = ShadowModelConfig.from_dict(session.record["config"])
         noise = args.noise_deg or 0.0
     elif args.clip is not None:
@@ -146,7 +153,12 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
         for k, (t, q) in enumerate(zip(times, qpos)):
             if args.realtime:
                 time.sleep(max(0.0, t - times[0] - (time.perf_counter() - wall0)))
-            frame = shadow.push(float(t), q, None if external is None else external[k])
+            frame = shadow.push(
+                float(t),
+                q,
+                None if external is None else external[k],
+                flags=0 if flags is None else int(flags[k]),
+            )
             if frame is not None:
                 frames.append(frame)
     return frames
@@ -169,6 +181,18 @@ def _summary(frames: list[ShadowFrame], log_dir: Path | None) -> str:
     return line + ("" if log_dir is None else f"; log in {log_dir}")
 
 
+def _analysis_parsers(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("report", help="quality report of a recorded session")
+    p.add_argument("--session", type=Path, required=True)
+    p.add_argument("--json", type=Path, help="also write the report as JSON")
+    p = sub.add_parser("sensitivity", help="replay a session under calibration errors")
+    p.add_argument("--session", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True, help="output directory")
+    p.add_argument(
+        "--window", type=int, action="append", default=[], help="also try this window"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of ``myosuite-shadow``."""
     parser = argparse.ArgumentParser(
@@ -176,7 +200,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     _replay_parser(sub)
+    _analysis_parsers(sub)
     args = parser.parse_args(argv)
+    if args.command == "report":
+        rep = session_report(args.session)
+        if args.json is not None:
+            args.json.write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(format_report(rep), end="")
+        return
+    if args.command == "sensitivity":
+        variants = (
+            *DEFAULT_VARIANTS,
+            *(Variant(f"window {w}", window=w) for w in args.window),
+        )
+        res = run_sensitivity(args.session, variants, out_dir=args.out)
+        for v, mf in zip(res.variants, res.fatigue):
+            print(f"{v.name:>20}: peak MF {mf.max():.3f}, final MF {mf[-1].max():.3f}")
+        print(f"summary.csv and bands.csv in {args.out}")
+        return
     if args.session is not None and args.model is None and args.env is None:
         if not (args.session / MODEL).exists():
             parser.error(f"{args.session} has no {MODEL}; pass --model or --env")

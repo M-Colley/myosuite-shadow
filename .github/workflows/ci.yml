@@ -26,8 +26,11 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install ${{ matrix.python }}
       - run: uv venv --python ${{ matrix.python }}
-      # Pulls MyoSuite from the branch named in pyproject.toml.
+      # Pulls MyoSuite from the branch named in pyproject.toml, with every extra.
       - run: uv pip install -e ".[test]"
+      - name: Lockfile matches pyproject.toml
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        run: uv lock --check
       - run: uv run --no-sync python -m pytest
       - run: uv run --no-sync python -m ruff check src tests benchmarks
       - run: uv run --no-sync python -m ruff format --check src tests

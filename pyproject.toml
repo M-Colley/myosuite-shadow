@@ -22,15 +22,23 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.24",
+  "scipy>=1.10",
   "mujoco>=3.3,<4",
   # The physics stack (live kinematics, static optimization with ground reactions and
   # per-frame activation bounds) is under review in MyoHub/myosuite (#635-#640).
-  # Switch to a release once it is merged.
+  # Switch to a release once it is merged; uv.lock pins the exact commit.
   "myosuite @ git+https://github.com/MyoHub/myosuite.git@feat/shadow-model",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "ruff==0.4.4"]
+# Tracker keypoints -> model poses (myosuite_shadow.ik).
+ik = ["mink>=1.0"]
+# LabStreamingLayer outlets (myosuite_shadow.lsl).
+lsl = ["pylsl>=1.16"]
+# XDF import and agreement statistics (myosuite_shadow.validation).
+validation = ["pyxdf>=1.16", "pingouin>=0.5.4", "pandas>=2"]
+all = ["myosuite-shadow[ik,lsl,validation]"]
+test = ["pytest>=8", "ruff==0.4.4", "myosuite-shadow[ik,lsl,validation]"]
 
 [project.urls]
 Homepage = "https://github.com/M-Colley/myosuite-shadow"

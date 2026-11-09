@@ -5,58 +5,115 @@ Live muscle activation and fatigue estimates beside an experiment, built on
 
 A shadow model follows a participant's tracked poses with a musculoskeletal
 model. Each pose goes through live joint kinematics, static optimization
-(optionally with ground reactions) and the 3CC-r fatigue model, and every
-estimate is logged for later analysis. A fatigued muscle is capped at
-`1 - MF` of its force, so the load moves to fresher synergists and then to the
-reserves.
-
-```python
-from myosuite_shadow import ShadowModel, ShadowModelConfig
-
-with ShadowModel(model, ShadowModelConfig(window=15), log_dir="logs/P07",
-                 metadata={"participant": "P07", "condition": "B"}) as shadow:
-    for t, qpos in tracker:  # IK of each tracked pose onto the subject model
-        frame = shadow.push(t, qpos)
-        if frame is not None:  # estimate of the pose `lag` frames back
-            frame.optimization.activation, frame.fatigue, frame.delay
-```
+(optionally with ground reactions) and the 3CC-r fatigue model. A fatigued
+muscle is capped at `1 - MF` of its force, so the load moves to fresher
+synergists and then to the reserves. Every pose, estimate and experimenter
+event is logged, and a crashed session can be resumed.
 
 Status: alpha. The estimates come from a model under a minimum-effort
-assumption. They are not measurements.
+assumption. They are not measurements: read [docs/limitations.md](docs/limitations.md)
+before using them in a study.
+
+## A study session
+
+```python
+import numpy as np
+from myosuite_shadow import LiveShadowModel, ShadowModel, ShadowModelConfig
+from myosuite_shadow.calibration import (fatigue_params, fit_fatigue_parameters,
+                                         posture_at, scale_body_mass, scale_strength,
+                                         strength_from_mvc)
+from myosuite_shadow.ik import Keypoint, KeypointIK
+from myosuite_shadow.lsl import LslSink
+
+# 1. Calibrate: MVC at 90 deg elbow flexion, body mass, endurance holds at 30 and 50 % MVC.
+qpos = posture_at(model, {"elbow_flexion_r": np.radians(90)})
+strength = strength_from_mvc(model, qpos, "elbow_flexion_r", measured_torque=62.0)
+# Scale the muscles the MVC measured; it says nothing about the others.
+model = scale_body_mass(scale_strength(model, strength.scale, strength.agonists), 71.5)
+fit = fit_fatigue_parameters([0.3, 0.5], [205.0, 74.0], F=0.01086, R=0.00225, r=4.93)
+flexors = ["BIClong", "BICshort", "BRA", "BRD"]
+config = ShadowModelConfig(fatigue_params=fatigue_params(model, flexors, fit), gap_load="rest")
+
+# 2. Run: tracker keypoints -> IK -> shadow model on its own thread, streamed to LSL.
+# Pronation needs points on both sides of the hand (see myosuite_shadow.ik).
+points = {"shoulder": "humerus_r", "elbow": "ulna_r", "wrist": "lunate_r",
+          "index_mcp": "secondmc_r", "little_mcp": "fifthmc_r", "middle_tip": "distph3_r"}
+ik = KeypointIK(model, [Keypoint(name, body) for name, body in points.items()])
+shadow = ShadowModel(model, config, log_dir="logs/P07", sinks=(LslSink(model),),
+                     metadata={"participant": "P07", "condition": "B"},
+                     calibration={"strength": strength.record(), "fatigue": fit.record()})
+with LiveShadowModel(shadow) as live:
+    live.mark("set_start", set=1, load_kg=2.0)
+    for t, points, confidence, captured in tracker:
+        pose = ik.solve(t, points, confidence)
+        if pose.usable:  # unusable frames become a tracking gap
+            live.submit(t, pose.qpos, flags=pose.flags, capture_unix=captured)
+        if live.latest is not None:
+            show(live.latest.fatigue)
+```
+
+```bash
+# 3. Check the session, then bound its estimates under calibration errors.
+myosuite-shadow report --session logs/P07
+myosuite-shadow sensitivity --session logs/P07 --out logs/P07/sensitivity
+```
+
+After a crash, `ShadowModel.resume("logs/P07")` continues the session from
+its last checkpoint. The time it was down counts as a tracking gap.
+
+## What it does
+
+| Need | Here |
+|---|---|
+| Fatigue that recovers in breaks | Untracked time longer than `max_gap` is integrated as rest (`gap_load="rest"`) or as the last load held (`"hold"`); the first estimate after it is flagged |
+| Per-participant calibration | `strength_from_mvc` and `scale_strength` (one MVC scales every muscle's peak force; exact, since MuJoCo muscle forces are proportional to it); `scale_body_mass`; `endurance_time` and `fit_fatigue_parameters` fit 3CC-r F (and R) to sustained holds |
+| Tracker input | `KeypointIK` (mink): keypoints onto bodies, sites or geoms, joint ranges as limits, joint couplings as hard constraints; 1-1.5 ms per myoArm frame, 3-5 ms with 3 mm keypoint noise |
+| Quality flags | Per pose and estimate: `LOW_CONFIDENCE`, `MISSING`, `IK_RESIDUAL`, `JOINT_LIMIT`, `GLITCH`, `AFTER_GAP`, `CAPACITY_EXCEEDED`, `NOT_SOLVED` (`myosuite_shadow.Flag`) |
+| Time sync | Receive and capture wall-clock times per pose; frame and completion times per estimate; `mark()` events; `LslSink` puts estimates and markers on the LSL clock, stamped at their frame's capture time, for LabRecorder |
+| Real time | `LiveShadowModel` never blocks the tracker. Behind schedule it optimizes only the newest pose; on overflow it drops only poses and counts them. `estimate_every` decimates optimizations |
+| Crash safety | Rows flushed as written; `checkpoint.json` (fsynced, atomic) every `checkpoint_every` s; `ShadowModel.resume` |
+| Reproducibility | `uv.lock` pins every dependency, including the MyoSuite commit. The record stores package commits (and dirty checkouts), the model hash, settings, calibration and resumes. Replaying `inputs.csv` is bit-exact |
+| After the session | `report` (gaps, flags, reserves, latency, drops, provenance warnings); `sensitivity` (uncertainty bands from strength x0.8/x1.25, F and R x0.5/x2, other windows); `myosuite_shadow.validation` (XDF import, EMG envelope and median frequency, residual capacity at MVC probes, Lin's concordance, repeated-measures correlation) |
 
 ## What lives here and what lives in MyoSuite
 
 MyoSuite has anything that computes something from a model and a motion,
 offline or live. This repository has what runs a session: the streaming
-pipeline, the logs and the replay tools. They can change from one study to the
-next without touching MyoSuite's API or parity tests.
+pipeline, calibration, IO, logs and the analysis around a study. They can
+change from one study to the next without touching MyoSuite's API or parity
+tests.
 
 | MyoSuite (`myosuite.physics`, `myosuite.core`) | myosuite-shadow |
 |---|---|
-| Inverse dynamics of clips ([#635](https://github.com/MyoHub/myosuite/pull/635)) | `ShadowModel`: kinematics, static optimization and fatigue chained on a live stream, with tracking gaps and known external loads |
-| Static optimization ([#636](https://github.com/MyoHub/myosuite/pull/636)) | Session logs with provenance (`record.json`, `estimates.csv`, `inputs.csv`, `model.mjb`) and `read_session` |
-| Live joint kinematics, `StreamingKinematics` ([#637](https://github.com/MyoHub/myosuite/pull/637)) | `myosuite-shadow replay` for synthetic reaches, motion clips and recorded sessions |
-| Ground reactions in static optimization ([#639](https://github.com/MyoHub/myosuite/pull/639)) | Synthetic reaches and tracking noise |
-| Per-frame activation bounds, `solve(max_activation=)` ([#640](https://github.com/MyoHub/myosuite/pull/640)) | Benchmarks: delay against accuracy, fatigue hold |
-| 3CC-r fatigue, `CumulativeFatigue` | |
-| Computed muscle control ([#644](https://github.com/MyoHub/myosuite/pull/644)) | |
+| Inverse dynamics of clips ([#635](https://github.com/MyoHub/myosuite/pull/635)) | `ShadowModel`, `LiveShadowModel` |
+| Static optimization ([#636](https://github.com/MyoHub/myosuite/pull/636)) and ground reactions ([#639](https://github.com/MyoHub/myosuite/pull/639)) | Calibration, tracker IK, quality flags |
+| Live joint kinematics, `StreamingKinematics` ([#637](https://github.com/MyoHub/myosuite/pull/637)) | Session logs, events, checkpoints, LSL |
+| Per-frame activation bounds, `solve(max_activation=)` ([#640](https://github.com/MyoHub/myosuite/pull/640)) | `replay`, `report`, `sensitivity`, validation statistics |
+| 3CC-r fatigue, `CumulativeFatigue`; computed muscle control ([#644](https://github.com/MyoHub/myosuite/pull/644)) | Benchmarks |
 
 ## Install
 
-Python 3.10 or newer. The MyoSuite physics stack is still under review
-(#635 to #640), so the dependency points at that branch until it is released:
+Python 3.10 or newer. Extras: `ik` (mink), `lsl` (pylsl), `validation` (pyxdf,
+pingouin), `all`.
 
 ```bash
-pip install "myosuite-shadow @ git+https://github.com/M-Colley/myosuite-shadow"
+pip install "myosuite-shadow[all] @ git+https://github.com/M-Colley/myosuite-shadow"
 ```
 
-For development:
+**For a study, freeze the environment.** The MyoSuite physics stack is still
+under review (#635 to #640), so `pyproject.toml` follows its branch. Install
+from the lockfile instead, so nothing moves between participants:
 
 ```bash
 git clone https://github.com/M-Colley/myosuite-shadow && cd myosuite-shadow
-uv venv -p 3.10 && uv pip install -e ".[test]"
-uv run --no-sync pytest
+uv sync --frozen --extra all
 ```
+
+`myosuite-shadow report` warns when a session ran from a moving ref or a
+checkout with uncommitted changes.
+
+For development: `uv venv -p 3.10 && uv pip install -e ".[test]"`, then
+`uv run --no-sync pytest`.
 
 ## Replay
 
@@ -76,20 +133,17 @@ myosuite-shadow replay --session logs/P07 --window 21 --log-dir logs/P07_w21
 
 ## Session logs
 
-With `log_dir`, a session writes:
-
 | File | Content |
 |---|---|
-| `record.json` | Creation time, Python and platform, versions and sources of `myosuite-shadow`, `myosuite`, `myo-sim`, `mujoco`, `osqp` and `numpy` (git commit for VCS and editable installs), the model's SHA-256 and joint layout, the settings and your `metadata` |
-| `estimates.csv` | One row per estimate: estimated frame time, newest pose time, update cost [ms], solver status, peak reserve, activation `a_<actuator>`, fatigue `mf_<actuator>`, and `contact_<body>_{x,y,z}` [N] for `log_contact_bodies` |
-| `inputs.csv` | Every pose pushed (`time`, `qpos_i`, known external `qfrc_ext_i`) |
+| `record.json` | Creation time, Python and platform, versions and sources of the packages (git commit and dirty flag for VCS and editable installs), the model's SHA-256, mass and joint layout, the settings, the calibration, your `metadata`, and every resume |
+| `estimates.csv` | Per estimate: `time` (estimated frame), `latest_time` (newest pose), `frame_unix`, `done_unix`, `compute_ms`, `status`, `flags`, `gap_s` (untracked time integrated before it), `skipped`, `max_abs_reserve` (joints), `max_abs_residual` (free root), `a_<actuator>`, `mf_<actuator>`, `contact_<body>_{x,y,z}` [N] |
+| `inputs.csv` | Every pose: `time`, `receive_unix`, `capture_unix`, `flags`, `qpos_i`, known external `qfrc_ext_i` |
+| `events.csv` | `unix`, `session_time`, `label`, `data` (JSON) |
+| `checkpoint.json` | Pipeline state and file offsets for `resume`; `closed` after a clean close |
 | `model.mjb` | The compiled model (`save_model=False` skips it) |
 
-Rows are flushed as they are written. Floats use Python's shortest round-trip
-representation, so replaying `inputs.csv` with the recorded settings reproduces
-the estimates bit for bit (tested). `read_session(log_dir)` returns everything
-as arrays, and `Session.load_model` checks the stored model against the
-record's hash.
+`read_session(log_dir)` returns everything as arrays. `Session.load_model`
+checks the stored model against the record's hash.
 
 ## Benchmarks
 
@@ -139,15 +193,18 @@ cap, muscles exceed their remaining capacity by up to 0.19 (0.64 at 40 N m).
 
 On a retargeted KIT walk (MyoFullBody at 100 Hz, with ground reactions; the
 clip is not included here) an update takes 15 ms (median), with a p99 of 56 ms.
-That is about 60 Hz live. Ground reactions are only estimated against
-world-fixed bodies (floor, chair, table).
+With `LiveShadowModel` the kinematics see every pose and the optimization
+should run at about 60 Hz on the newest one (from the update time; not yet
+measured live). Ground reactions are only
+estimated against world-fixed bodies (floor, chair, table).
 
 ## Citing
 
 See [`CITATION.cff`](CITATION.cff). Please also cite MyoSuite (Caggiano et al.,
 L4DC 2022), the 3CC-r fatigue model (Looft, Herkert and Frey-Law, J. Biomech.
-2018) and static optimization (Crowninshield and Brand, J. Biomech. 1981;
-Anderson and Pandy, J. Biomech. 2001).
+2018), static optimization (Crowninshield and Brand, J. Biomech. 1981;
+Anderson and Pandy, J. Biomech. 2001), and mink and LabStreamingLayer if you
+use the IK or LSL parts.
 
 ## License
 

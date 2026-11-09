@@ -92,3 +92,21 @@ def test_session_without_model_needs_one(tmp_path: Path) -> None:
     (tmp_path / "model.mjb").unlink()
     with pytest.raises(SystemExit):
         main(["replay", "--session", str(tmp_path)])
+
+
+def test_report_and_sensitivity_commands(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    main(["replay", *_ELBOW, "--log-dir", str(tmp_path / "s")])
+    capsys.readouterr()
+    main(
+        ["report", "--session", str(tmp_path / "s"), "--json", str(tmp_path / "r.json")]
+    )
+    out = capsys.readouterr().out
+    assert out.startswith("# Session report") and "## Warnings" in out
+    assert (tmp_path / "r.json").exists()
+    main(
+        ["sensitivity", "--session", str(tmp_path / "s"), "--out", str(tmp_path / "o")]
+    )
+    out = capsys.readouterr().out
+    assert out.count("peak MF") == 7 and (tmp_path / "o" / "bands.csv").exists()

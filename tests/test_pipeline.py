@@ -15,6 +15,7 @@ from myosuite.physics.static_optimization import (
 from myosuite.physics.streaming_kinematics import StreamingKinematics
 
 from myosuite_shadow import ShadowModel, ShadowModelConfig
+from myosuite_shadow.flags import Flag
 
 
 def _hold(model, load: float, limits: bool, seconds: float = 120.0, rate: float = 20.0):
@@ -79,16 +80,102 @@ def test_fatigue_integrates_the_time_between_estimates(elbow: mujoco.MjModel) ->
     assert frames[-1].fatigue.max() > 0.05  # ten seconds of holding
 
 
-def test_tracking_gap_restarts_kinematics_and_holds_fatigue(
+def _reference_fatigue(model, frames) -> CumulativeFatigue:
+    """3CC-r driven by each estimate's activations over the interval before it."""
+    ref = CumulativeFatigue(model)
+    for prev, f in zip(frames, frames[1:]):
+        ref.compute_act(
+            f.optimization.activation[ref.muscle_ids], dt=f.state.time - prev.state.time
+        )
+    return ref
+
+
+@pytest.mark.parametrize("gap_load", ["rest", "hold"])
+def test_gap_integrates_the_untracked_time(
+    elbow: mujoco.MjModel, gap_load: str
+) -> None:
+    shadow = ShadowModel(elbow, ShadowModelConfig(window=5, gap_load=gap_load))
+    pose, load = np.array([1.2]), np.array([-20.0])
+    before = [shadow.push(k / 20, pose, load) for k in range(40)]
+    after = [shadow.push(3.0 + k / 20, pose, load) for k in range(5)]  # 1.05 s gap
+    before = [f for f in before if f is not None]
+    assert all(f is None for f in after[:4])
+    first = after[4]
+    assert first.gap == pytest.approx(1.05) and Flag.AFTER_GAP in first.flags
+    assert Flag.AFTER_GAP not in before[-1].flags
+    ref = _reference_fatigue(elbow, before)
+    last = before[-1].optimization.activation[ref.muscle_ids]
+    ref.compute_act(last, dt=1.95 - before[-1].state.time)  # tracked until 1.95 s
+    ref.compute_act(np.zeros_like(last) if gap_load == "rest" else last, dt=1.05)
+    ref.compute_act(
+        first.optimization.activation[ref.muscle_ids], dt=first.state.time - 3.0
+    )
+    np.testing.assert_allclose(first.fatigue[ref.muscle_ids], ref.MF, atol=1e-12)
+
+
+def test_muscles_recover_during_a_rest(elbow: mujoco.MjModel) -> None:
+    pose, load = np.array([1.2]), np.array([-20.0])
+    out = {}
+    for gap_load in ("rest", "hold"):
+        shadow = ShadowModel(elbow, ShadowModelConfig(window=5, gap_load=gap_load))
+        held = [shadow.push(k / 20, pose, load) for k in range(1200)][-1]  # 60 s
+        # Two minutes without tracking, then the same hold again.
+        out[gap_load] = [shadow.push(180.0 + k / 20, pose, load) for k in range(5)][-1]
+    assert out["rest"].fatigue.max() < 0.6 * held.fatigue.max()
+    assert out["hold"].fatigue.max() > held.fatigue.max() + 0.1
+
+
+def test_gap_before_the_first_estimate_leaves_fatigue_alone(
     elbow: mujoco.MjModel,
 ) -> None:
     shadow = ShadowModel(elbow, ShadowModelConfig(window=5))
-    pose, load = np.array([1.2]), np.array([-20.0])
-    before = [shadow.push(k / 20, pose, load) for k in range(40)][-1]
-    # One second without tracking.
-    after = [shadow.push(3.0 + k / 20, pose, load) for k in range(5)]
-    assert all(f is None for f in after[:4]) and after[4] is not None
-    np.testing.assert_array_equal(after[4].fatigue, before.fatigue)
+    [shadow.push(k / 20, np.array([1.2])) for k in range(3)]
+    frames = [shadow.push(2.0 + k / 20, np.array([1.2])) for k in range(5)]
+    assert frames[4].gap == pytest.approx(1.9) and not frames[4].fatigue.any()
+
+
+def test_flags_follow_the_poses_in_the_fit(elbow: mujoco.MjModel) -> None:
+    shadow = ShadowModel(elbow, ShadowModelConfig(window=5, fatigue=False))
+    frames = [
+        shadow.push(k / 20, np.array([1.2]), flags=Flag.GLITCH if k == 10 else 0)
+        for k in range(20)
+    ]
+    glitch = [k for k, f in enumerate(frames) if f and Flag.GLITCH in f.flags]
+    assert glitch == list(range(10, 15))  # the five fits that include pose 10
+    first = next(f for f in frames if f is not None)
+    assert first.flags == Flag.NONE  # a session start is not a gap
+
+
+def test_capacity_and_solver_flags(elbow: mujoco.MjModel) -> None:
+    shadow = ShadowModel(elbow, ShadowModelConfig(window=5, fatigue=False))
+    light = [shadow.push(k / 20, np.array([1.2]), np.array([-5.0])) for k in range(5)]
+    heavy = [
+        shadow.push(1 + k / 20, np.array([1.2]), np.array([-200.0])) for k in range(5)
+    ]
+    assert Flag.CAPACITY_EXCEEDED not in light[-1].flags
+    assert Flag.CAPACITY_EXCEEDED in heavy[-1].flags
+    assert Flag.NOT_SOLVED not in heavy[-1].flags
+
+
+def test_decimation_skips_optimizations_not_fatigue(elbow: mujoco.MjModel) -> None:
+    shadow = ShadowModel(elbow, ShadowModelConfig(window=5, estimate_every=3))
+    pushed = [
+        shadow.push(k / 20, np.array([1.2]), np.array([-20.0])) for k in range(64)
+    ]
+    frames = [f for f in pushed if f is not None]
+    assert [k for k, f in enumerate(pushed) if f is not None][:3] == [4, 7, 10]
+    assert frames[0].skipped == 0 and all(f.skipped == 2 for f in frames[1:])
+    ref = _reference_fatigue(elbow, frames)
+    np.testing.assert_allclose(frames[-1].fatigue[ref.muscle_ids], ref.MF, atol=1e-12)
+    # A runner behind schedule passes estimate=False: kinematics only.
+    assert shadow.push(64 / 20, np.array([1.2]), estimate=False) is None
+    assert shadow.push(65 / 20, np.array([1.2]), estimate=False) is None
+    assert shadow.push(66 / 20, np.array([1.2])).skipped == 4  # 62, 63, 64, 65
+
+
+def test_config_rejects_unknown_gap_load() -> None:
+    with pytest.raises(ValueError, match="gap_load"):
+        ShadowModelConfig(gap_load="freeze")
 
 
 def test_external_load_belongs_to_the_estimated_frame(elbow: mujoco.MjModel) -> None:
