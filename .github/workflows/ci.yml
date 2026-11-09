@@ -17,25 +17,38 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ["3.10"]
-        include:
-          - os: ubuntu-latest
-            python: "3.12"
+        python: ["3.12", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv python install ${{ matrix.python }}
       - run: uv venv --python ${{ matrix.python }}
+      # h5py (a MyoSuite dependency) has no Python 3.15 wheels yet, so it builds
+      # from source against the HDF5 library. osqp, daqp, mink and zstandard also
+      # build from source on 3.15, with the runners' compilers.
+      - name: HDF5 for h5py (Linux, Python 3.15)
+        if: runner.os == 'Linux' && matrix.python == '3.15'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libhdf5-dev pkg-config
+          echo "HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial" >> "$GITHUB_ENV"
+      - name: HDF5 for h5py (Windows, Python 3.15)
+        if: runner.os == 'Windows' && matrix.python == '3.15'
+        shell: pwsh
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" create -y -q -p "$env:RUNNER_TEMP\hdf5" -c conda-forge "hdf5=1.14"
+          "HDF5_DIR=$env:RUNNER_TEMP\hdf5\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "$env:RUNNER_TEMP\hdf5\Library\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       # Pulls MyoSuite from the branch named in pyproject.toml, with every extra.
       - run: uv pip install -e ".[test]"
       - name: Lockfile matches pyproject.toml
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        if: runner.os == 'Linux' && matrix.python == '3.12'
         run: uv lock --check
       - run: uv run --no-sync python -m pytest
       - run: uv run --no-sync python -m ruff check src tests benchmarks
       - run: uv run --no-sync python -m ruff format --check src tests
       - name: Benchmarks still run
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        if: runner.os == 'Linux' && matrix.python == '3.12'
         run: |
           uv run --no-sync python benchmarks/fatigue_hold.py
           uv run --no-sync python benchmarks/delay_accuracy.py --duration 4

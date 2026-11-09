@@ -93,7 +93,7 @@ tests.
 
 ## Install
 
-Python 3.10 or newer. Extras: `ik` (mink), `lsl` (pylsl), `validation` (pyxdf,
+Python 3.10 or newer; CI tests 3.12 and 3.15 on Linux and Windows. Extras: `ik` (mink), `lsl` (pylsl), `validation` (pyxdf,
 pingouin), `all`.
 
 ```bash
@@ -112,7 +112,10 @@ uv sync --frozen --extra all
 `myosuite-shadow report` warns when a session ran from a moving ref or a
 checkout with uncommitted changes.
 
-For development: `uv venv -p 3.10 && uv pip install -e ".[test]"`, then
+On Python 3.15, `h5py` (a MyoSuite dependency) has no wheels yet and builds
+against the HDF5 library (`HDF5_DIR`); see `.github/workflows/ci.yml`.
+
+For development: `uv venv -p 3.12 && uv pip install -e ".[test]"`, then
 `uv run --no-sync pytest`.
 
 ## Replay
