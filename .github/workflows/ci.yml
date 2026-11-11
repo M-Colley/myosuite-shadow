@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-2025]
         python: ["3.12", "3.15"]
     steps:
       - uses: actions/checkout@v4
@@ -69,16 +69,11 @@ jobs:
         if: runner.os == 'Linux' && matrix.python == '3.15'
         timeout-minutes: 5
         run: |
-          hdf5_dir=/usr/lib/x86_64-linux-gnu/hdf5/serial
-          if ! pkg-config --exists hdf5 || [[ ! -f "$hdf5_dir/include/hdf5.h" ]]; then
-            apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
-            if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y -q --no-install-recommends libhdf5-dev pkg-config; then
-              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update -q
-              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y -q --no-install-recommends libhdf5-dev pkg-config
-            fi
-          fi
+          hdf5_dir="$RUNNER_TEMP/hdf5"
+          "$CONDA/bin/conda" create -y -q --override-channels -c conda-forge -p "$hdf5_dir" 'hdf5=1.14=*nompi*'
           test -f "$hdf5_dir/include/hdf5.h"
           echo "HDF5_DIR=$hdf5_dir" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$hdf5_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: HDF5 for h5py (Windows, Python 3.15)
         if: runner.os == 'Windows' && matrix.python == '3.15'
         shell: pwsh

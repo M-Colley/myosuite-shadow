@@ -63,6 +63,14 @@ revisions.
 
 ## CI and dependency updates
 
+CI uses Ubuntu 24.04 and Windows 2025 with Python 3.12 and 3.15. The runner images
+are pinned because their Conda installations supply HDF5 1.14 for source-built
+Python 3.15 dependencies. Linux exposes that prefix through `LD_LIBRARY_PATH`;
+Windows registers its DLL directory before importing h5py. The required-interface
+step imports both h5py and pylsl, so missing native libraries cannot silently
+reduce the all-extras test coverage. HDF5 provisioning does not depend on APT
+mirrors, and the Linux setup step has a bounded duration.
+
 The Checks workflow has defaults for the published repository and exact commit;
 no Actions variables are required for the normal pinned build. It installs with
 `uv sync --frozen --extra test`, verifies the installed MyoSuite commit, and
