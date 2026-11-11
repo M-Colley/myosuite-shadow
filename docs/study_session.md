@@ -34,6 +34,8 @@ passive contribution, in N m for hinges or N for slides. Save measured postures,
 instrument calibration and residuals. Fit fatigue on calibration holds and retain
 the initial fatigue state if those holds have not been followed by recovery.
 Save the final model and calibration records after all changes.
+MVC helpers require force to be affine in activation and strength: force clamps,
+multi-state actuators and artificial body gravity compensation are rejected.
 
 ## Configure and run
 
@@ -64,6 +66,14 @@ Review the anatomical mapping for every source/model version. All mapped landmar
 are required by default; `ik.required_keypoints` can define a reviewed subset.
 Inferred inputs and positive prediction horizons are rejected by default.
 
+Set IK speed limits for the actual task. `ik.max_joint_speed` bounds scalar
+hinge/slide speeds and ball/free-joint angular speed (default 30 rad/s, or m/s
+for slides). `ik.max_root_linear_speed` separately bounds floating-root
+translation (default 5 m/s). Sudden coherent whole-body jumps can fit landmarks
+well; they still require rejection before differentiation and muscle estimation.
+Quality and solver thresholds must be finite, with positive speed/residual
+limits.
+
 ```bash
 myosuite-shadow-track --config study.json --quest-port 9763 --host 0.0.0.0 --log-dir logs/P07_B
 ```
@@ -82,6 +92,8 @@ myosuite-shadow-track --config camera_study.json --frames camera_3d.jsonl --log-
 Offline raw replay disables wall-clock age checks and drains the worker after
 each frame for deterministic computation. It retains source timestamps and records
 the offline policy. Accepted-pose `replay --session` retains the live decisions.
+Use a separate output session when reprocessing its `tracking.jsonl`; the CLI
+rejects reading and appending the same raw file, including filesystem aliases.
 
 ## Monitor and recover
 

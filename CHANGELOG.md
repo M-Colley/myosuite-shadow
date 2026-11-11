@@ -3,7 +3,7 @@
 ## 0.3.0 (unreleased)
 
 Pins the published MyoSuite source commit
-[`751057ba63cb09c4843c1973eaa81e658b27f50a`](https://github.com/MyoHub/myosuite/commit/751057ba63cb09c4843c1973eaa81e658b27f50a),
+[`a14953a849ccc952dedd7bbd7d4578c8632c771e`](https://github.com/MyoHub/myosuite/commit/a14953a849ccc952dedd7bbd7d4578c8632c771e),
 with optional editable development described in [development.md](docs/development.md).
 Reusable model calculations live in `myosuite.biomechanics`; shadow owns
 acquisition and study orchestration. This remains alpha software, not an official
@@ -18,11 +18,17 @@ MyoSuite release or a completed participant validation.
   decisions, requires reviewed landmarks, applies inference/prediction/timing
   policy and gates IK quality. Registration/skeleton changes require renewed
   registration and reset the fit. Rejected IK solutions do not become priors.
+  Speed checks include floating-root translation/rotation and ball joints;
+  nonfinite thresholds are rejected. Invalid pose clocks do not advance
+  acquisition ordering, allowing valid subsequent frames to recover.
 - **Calibration and actual loads.** Shadow re-exports MyoSuite's calibration
   interfaces: selective MVC strength scaling, multi-posture fits, geometry
   checks, explicit represented/reference mass semantics and fatigue hold fits.
   External-load helpers map measured forces or held-object gravity into joint
   forces; a load marker alone does not apply a physical load.
+  Steady MVC probes handle early activation updates and reject force clamps,
+  multi-state actuators and gravity compensation. Fatigue fitting initializes
+  finite failure predictions when the starting fatigue rate is too slow.
 - **Timestamp meanings.** `capture_unix` remains a measured capture timestamp.
   Separate `evaluation_unix` describes mapped tracked/predicted state time;
   receive time remains distinct. Frame/LSL timestamps prefer capture, then
@@ -38,6 +44,8 @@ MyoSuite release or a completed participant validation.
   unsaved, so crash recovery is checked within tolerance.
   Appending raw/quality JSONL after a torn write preserves the exact partial bytes
   in recovery sidecars before continuing complete records.
+  Raw-frame reprocessing refuses to read the session's own acquisition output,
+  including filesystem aliases, before changing session files.
 - **Worker lifecycle.** Timed close leaves resources open while the worker is
   active; completed close is idempotent. Health reports age, stale/error status,
   queue and drops. Queued resets preserve order. `drain()` waits explicitly for

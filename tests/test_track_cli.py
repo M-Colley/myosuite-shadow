@@ -122,3 +122,48 @@ def test_resume_config_is_checked_before_modifying_session_files(
         ]
     )
     assert len(read_session(log).input_time) == 40
+
+
+@pytest.mark.parametrize("alias_kind", ["same_path", "relative_path", "hardlink"])
+def test_resume_refuses_raw_input_output_alias_before_changing_session(
+    elbow: mujoco.MjModel, tmp_path: Path, monkeypatch, alias_kind: str
+) -> None:
+    config, _ = _fixture(elbow, tmp_path)
+    missing = tmp_path / "missing.jsonl"
+    with RawFrameWriter(missing) as writer:
+        for index in range(2):
+            writer.write(
+                TrackerFrame(
+                    index, "camera", index, "P07", {}, coordinate_frame="model_world"
+                )
+            )
+    log = tmp_path / "session"
+    main(["--config", str(config), "--frames", str(missing), "--log-dir", str(log)])
+    tracked = log / "tracking.jsonl"
+    if alias_kind == "hardlink":
+        source = tmp_path / "tracking-alias.jsonl"
+        source.hardlink_to(tracked)
+        assert source.resolve() != tracked.resolve()
+    elif alias_kind == "relative_path":
+        monkeypatch.chdir(tmp_path)
+        source = Path("session") / "tracking.jsonl"
+    else:
+        source = tracked
+    before = {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--config",
+                str(config),
+                "--frames",
+                str(source),
+                "--log-dir",
+                str(log),
+                "--resume",
+                "--max-frames",
+                "5",
+            ]
+        )
+    assert error.value.code == 2
+    assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    assert len(tracked.read_text().splitlines()) == 2

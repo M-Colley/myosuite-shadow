@@ -1,7 +1,7 @@
 # Installing and developing study support
 
 The default dependency is the published MyoSuite source commit
-[`751057ba63cb09c4843c1973eaa81e658b27f50a`](https://github.com/MyoHub/myosuite/commit/751057ba63cb09c4843c1973eaa81e658b27f50a),
+[`a14953a849ccc952dedd7bbd7d4578c8632c771e`](https://github.com/MyoHub/myosuite/commit/a14953a849ccc952dedd7bbd7d4578c8632c771e),
 on `codex/study-shadow-support`. It provides the required
 `myosuite.biomechanics.calibration`, `external_loads`, `streaming_kinematics`
 and `camera` interfaces. This source pin is not an official MyoSuite release.
@@ -45,7 +45,7 @@ model package after synchronizing the frozen environment:
 
 ```bash
 git clone https://github.com/MyoHub/myosuite.git ../myosuite-study-support
-git -C ../myosuite-study-support checkout 751057ba63cb09c4843c1973eaa81e658b27f50a
+git -C ../myosuite-study-support checkout a14953a849ccc952dedd7bbd7d4578c8632c771e
 uv pip install --no-deps --editable ../myosuite-study-support
 uv run --no-sync python -m pytest
 uv run --no-sync python -m pytest ../myosuite-study-support/myosuite/tests/test_subject_calibration.py ../myosuite-study-support/myosuite/tests/test_streaming_kinematics.py ../myosuite-study-support/myosuite/tests/test_camera_reconstruction.py
@@ -91,15 +91,15 @@ that remote CI has passed.
 
 ## Local verification baseline
 
-Shadow's final local suite passed **158 tests**, with Ruff lint/format and
+Shadow's final local suite passed **187 tests**, with Ruff lint/format and
 `uv lock --check` passing. The publication audit found no credentials, generated
 binaries, participant recordings or model weights among the candidate shadow
 changes. Full and targeted MyoSuite pre-commit hooks passed before the core commit
 was pushed.
 
 The combined MyoSuite checks on Windows, Python 3.12.7, MuJoCo 3.17.0 and NumPy
-2.5.4 produced **344 passed, 4 expected failures and 5 failures**, including the
-26 study-support tests. The five failures are four parity mismatches and a
+2.5.4 produced **351 passed, 4 expected failures and 5 failures**, including the
+33 study-support tests. The five failures are four parity mismatches and a
 registry check requiring unavailable KIT clips 971/972. All five were reproduced
 against the unchanged original `dev` checkout at
 `87f8ac4adb3498cefbbbb6b0fcabb76d16475d4f`, with tracked files clean and imports

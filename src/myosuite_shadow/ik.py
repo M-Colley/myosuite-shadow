@@ -83,7 +83,10 @@ class IKConfig:
         min_keypoints: Fewer usable keypoints make the frame unusable.
         max_residual: Larger residuals flag ``IK_RESIDUAL`` [m].
         max_joint_speed: Faster hinge/slide motion between frames flags
-            ``GLITCH`` [rad/s or m/s].
+            ``GLITCH`` [rad/s or m/s]. Also bounds the angular speed norm
+            of ball joints and floating roots [rad/s].
+        max_root_linear_speed: Faster floating-root translation flags
+            ``GLITCH`` [m/s], using its velocity norm.
         limit_margin: Joints this close to a range limit flag ``JOINT_LIMIT``.
         couplings: Enforce the model's equality constraints (joint couplings).
     """
@@ -103,10 +106,28 @@ class IKConfig:
     couplings: bool = True
     required_keypoints: tuple[str, ...] = ()
     reject_flags: int = int(Flag.IK_RESIDUAL | Flag.GLITCH)
+    max_root_linear_speed: float = 5.0
 
     def __post_init__(self) -> None:
-        if self.min_keypoints < 1 or self.max_residual <= 0:
-            raise ValueError("min_keypoints and max_residual must be positive")
+        for name in ("min_keypoints", "max_iterations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in (
+            "position_cost",
+            "max_residual",
+            "max_joint_speed",
+            "max_root_linear_speed",
+            "tolerance",
+            "step_tolerance",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name in ("smoothing", "damping", "limit_margin"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
         if not 0 <= self.min_confidence <= 1:
             raise ValueError("min_confidence must be in [0, 1]")
 
@@ -186,6 +207,14 @@ class KeypointIK:
         self._limit_adr = model.jnt_qposadr[limited]
         self._limit_range = model.jnt_range[limited]
         self._scalar_dofs = model.jnt_dofadr[scalar]
+        self._root_dofs = model.jnt_dofadr[model.jnt_type == mujoco.mjtJoint.mjJNT_FREE]
+        free_type = int(mujoco.mjtJoint.mjJNT_FREE)
+        ball_type = int(mujoco.mjtJoint.mjJNT_BALL)
+        self._rotation_dofs = [
+            int(adr) + (3 if int(kind) == free_type else 0)
+            for kind, adr in zip(model.jnt_type, model.jnt_dofadr)
+            if int(kind) in (free_type, ball_type)
+        ]
         self._prev: tuple[float, np.ndarray] | None = None
         self._last_time: float | None = None
 
@@ -302,7 +331,17 @@ class KeypointIK:
             mujoco.mj_differentiatePos(
                 self.model, dq, time_s - self._prev[0], self._prev[1], q
             )
-            if np.abs(dq[self._scalar_dofs]).max(initial=0.0) > cfg.max_joint_speed:
+            if (
+                np.abs(dq[self._scalar_dofs]).max(initial=0.0) > cfg.max_joint_speed
+                or any(
+                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_joint_speed
+                    for adr in self._rotation_dofs
+                )
+                or any(
+                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_root_linear_speed
+                    for adr in self._root_dofs
+                )
+            ):
                 flags |= Flag.GLITCH
         usable = not bool(int(flags) & cfg.reject_flags)
         if usable:

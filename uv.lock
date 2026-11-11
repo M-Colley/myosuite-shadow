@@ -2152,7 +2152,7 @@ wheels = [
 [[package]]
 name = "myosuite"
 version = "3.0.0"
-source = { git = "https://github.com/MyoHub/myosuite.git?rev=751057ba63cb09c4843c1973eaa81e658b27f50a#751057ba63cb09c4843c1973eaa81e658b27f50a" }
+source = { git = "https://github.com/MyoHub/myosuite.git?rev=a14953a849ccc952dedd7bbd7d4578c8632c771e#a14953a849ccc952dedd7bbd7d4578c8632c771e" }
 dependencies = [
     { name = "click" },
     { name = "colorednoise" },
@@ -2247,7 +2247,7 @@ requires-dist = [
     { name = "mink", marker = "extra == 'ik'", specifier = ">=1.0" },
     { name = "mink", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "mujoco", specifier = ">=3.3,<4" },
-    { name = "myosuite", git = "https://github.com/MyoHub/myosuite.git?rev=751057ba63cb09c4843c1973eaa81e658b27f50a" },
+    { name = "myosuite", git = "https://github.com/MyoHub/myosuite.git?rev=a14953a849ccc952dedd7bbd7d4578c8632c771e" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", marker = "extra == 'all'", specifier = ">=2" },
     { name = "pandas", marker = "extra == 'test'", specifier = ">=2" },

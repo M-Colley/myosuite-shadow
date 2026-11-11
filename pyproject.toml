@@ -24,9 +24,9 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
   "mujoco>=3.3,<4",
-  # The study-support APIs require the paired MyoSuite source checkout below.
-  # Replace the source override with a released version once those APIs ship.
-  "myosuite @ git+https://github.com/MyoHub/myosuite.git@751057ba63cb09c4843c1973eaa81e658b27f50a",
+  # The study-support APIs require this published MyoSuite source revision.
+  # Replace the Git pin with a released version once those APIs ship.
+  "myosuite @ git+https://github.com/MyoHub/myosuite.git@a14953a849ccc952dedd7bbd7d4578c8632c771e",
 ]
 
 [project.optional-dependencies]

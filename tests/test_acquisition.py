@@ -241,6 +241,86 @@ def test_stale_source_estimate_is_rejected_despite_fresh_receive_time(setup, tmp
     assert _decisions(tmp_path)[0]["reason"] == "stale_or_future_timestamp"
 
 
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        (
+            {"capture_unix": 1030.0, "transform_revision": 1, "skeleton_revision": 2},
+            "stale_or_future_timestamp",
+        ),
+        ({"capture_unix": None, "time_kind": "estimate"}, "unmapped_pose_clock"),
+        (
+            {"metadata": {"clock_mapping": {"uncertainty_s": 0.1}}},
+            "clock_uncertainty",
+        ),
+        ({"metadata": {"clock_mapping": []}}, "invalid_clock_mapping"),
+    ],
+)
+def test_invalid_time_or_clock_does_not_poison_valid_followup(
+    setup, tmp_path, change, reason
+):
+    _, solver, live, points = setup
+    with TrackedSession(live, solver, raw_dir=tmp_path) as session:
+        assert session.submit(_frame(points))
+        assert not session.submit(_frame(points, sequence=2, time_s=31.0, **change))
+        assert session.submit(_frame(points, sequence=3, time_s=1.1))
+        assert not session.health["registration_required"]
+    assert len(live.submissions) == 2
+    assert [d["reason"] for d in _decisions(tmp_path)] == [None, reason, None]
+    assert len(list(read_frames(tmp_path / "tracking.jsonl"))) == 3
+
+
+@pytest.mark.parametrize("uncertainty", ["oops", None, -0.1, True, 10**400])
+def test_invalid_clock_uncertainty_is_rejected_without_poisoning_order(
+    setup, uncertainty
+):
+    _, solver, live, points = setup
+    with TrackedSession(live, solver) as session:
+        assert session.submit(_frame(points))
+        assert not session.submit(
+            _frame(
+                points,
+                sequence=2,
+                time_s=31.0,
+                metadata={"clock_mapping": {"uncertainty_s": uncertainty}},
+            )
+        )
+        assert session.health["last_rejection"] == "invalid_clock_mapping"
+        assert session.submit(_frame(points, sequence=3, time_s=1.1))
+    assert len(live.submissions) == 2
+
+
+def test_first_future_frame_cannot_bind_the_participant_identity(setup):
+    _, solver, live, points = setup
+    with TrackedSession(live, solver) as session:
+        assert not session.submit(
+            _frame(
+                points, person_id="P08", sequence=100, time_s=31.0, capture_unix=1030.0
+            )
+        )
+        assert session.submit(_frame(points))
+    assert len(live.submissions) == 1
+
+
+def test_normal_quality_rejection_still_consumes_its_sequence(setup, tmp_path):
+    _, solver, live, points = setup
+    with TrackedSession(live, solver, raw_dir=tmp_path) as session:
+        assert session.submit(_frame(points))
+        bad = _frame(
+            points, sequence=2, time_s=1.1, confidence={"elbow": 1.0, "hand": 0.2}
+        )
+        assert not session.submit(bad)
+        assert not session.submit(_frame(points, sequence=2, time_s=1.1))
+        assert session.submit(_frame(points, sequence=3, time_s=1.2))
+    assert len(live.submissions) == 2
+    assert [d["reason"] for d in _decisions(tmp_path)] == [
+        None,
+        "required_landmarks",
+        "out_of_order",
+        None,
+    ]
+
+
 def test_failed_worker_health_is_not_hidden_by_stale_tracking(setup, monkeypatch):
     _, solver, live, points = setup
     with TrackedSession(live, solver) as session:

@@ -49,6 +49,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.max_frames is not None and args.max_frames < 1:
         parser.error("--max-frames must be positive")
+    if args.frames is not None:
+        tracking_output = args.log_dir / "tracking.jsonl"
+        if args.frames.resolve() == tracking_output.resolve() or (
+            args.frames.exists()
+            and tracking_output.exists()
+            and args.frames.samefile(tracking_output)
+        ):
+            parser.error("--frames must differ from the session tracking.jsonl output")
     settings = json.loads(args.config.read_text(encoding="utf-8-sig"))
     model_path = Path(settings["model"])
     if not model_path.is_absolute():

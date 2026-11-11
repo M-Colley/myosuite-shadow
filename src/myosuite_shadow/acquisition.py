@@ -159,9 +159,7 @@ class TrackedSession:
             self._raw.write(frame)
         reason = None
         identity = (frame.source_id, frame.person_id)
-        if self._identity is None:
-            self._identity = identity
-        if identity != self._identity:
+        if self._identity is not None and identity != self._identity:
             reason = "source_or_person_changed"
         elif (
             self._last_sequence is not None
@@ -170,15 +168,8 @@ class TrackedSession:
             and frame.time_s <= self._last_time
         ):
             reason = "out_of_order"
-        else:
-            self._last_sequence, self._last_time = frame.sequence, frame.time_s
-        revision = (frame.transform_revision, frame.skeleton_revision)
-        if reason is None:
-            if self._revision is not None and revision != self._revision:
-                self._registration_needed = True
-            self._revision = revision
-        if self._registration_needed:
-            reason = reason or "registration_required"
+        ordering_admissible = reason is None
+        time_admissible = True
         if frame.prediction_s > self.config.max_prediction_s:
             reason = reason or "prediction_horizon"
         if self.config.required_fidelity is not None and (
@@ -193,6 +184,7 @@ class TrackedSession:
             and self.config.require_mapped_time
             and stamp is None
         ):
+            time_admissible = False
             reason = reason or "unmapped_pose_clock"
         if stamp is None:
             stamp = frame.receive_unix
@@ -204,13 +196,38 @@ class TrackedSession:
                 or stamp > now() + self.config.max_clock_uncertainty_s
             )
         ):
+            time_admissible = False
             reason = reason or "stale_or_future_timestamp"
         clock = frame.metadata.get("clock_mapping", frame.metadata.get("clock", {}))
         if not isinstance(clock, dict):
+            time_admissible = False
             reason = reason or "invalid_clock_mapping"
             clock = {}
-        if clock.get("uncertainty_s", 0) > self.config.max_clock_uncertainty_s:
+        uncertainty = clock.get("uncertainty_s", 0)
+        if isinstance(uncertainty, bool) or not isinstance(uncertainty, int | float):
+            uncertainty = None
+        else:
+            try:
+                uncertainty = float(uncertainty)
+            except OverflowError:
+                uncertainty = None
+        if uncertainty is None or not np.isfinite(uncertainty) or uncertainty < 0:
+            time_admissible = False
+            reason = reason or "invalid_clock_mapping"
+        elif uncertainty > self.config.max_clock_uncertainty_s:
+            time_admissible = False
             reason = reason or "clock_uncertainty"
+        # Invalid clock evidence cannot advance ordering or spatial revisions.
+        if ordering_admissible and time_admissible:
+            if self._identity is None:
+                self._identity = identity
+            self._last_sequence, self._last_time = frame.sequence, frame.time_s
+            revision = (frame.transform_revision, frame.skeleton_revision)
+            if self._revision is not None and revision != self._revision:
+                self._registration_needed = True
+            self._revision = revision
+        if self._registration_needed:
+            reason = reason or "registration_required"
         clock_record = json.dumps(clock, sort_keys=True)
         if reason is None and clock:
             if self._clock_record is not None and self._clock_record != clock_record:
