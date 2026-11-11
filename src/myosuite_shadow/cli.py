@@ -35,7 +35,7 @@ import numpy as np
 from myosuite_shadow.log import MODEL, read_session
 from myosuite_shadow.motions import add_tracking_noise, reaching_motion
 from myosuite_shadow.pipeline import ShadowFrame, ShadowModel, ShadowModelConfig
-from myosuite_shadow.report import format_report, session_report
+from myosuite_shadow.report import ReportThresholds, format_report, session_report
 from myosuite_shadow.sensitivity import DEFAULT_VARIANTS, Variant, run_sensitivity
 
 _DEFAULT_ENV = "myoArmReachRandom-v0"
@@ -99,11 +99,8 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
     else:
         model = session.load_model(args.session)
 
-    external, flags = None, None
     if session is not None:
         times, qpos = session.input_time, session.input_qpos
-        external = session.input_qfrc
-        flags = session.input_columns["flags"].astype(int)
         base = ShadowModelConfig.from_dict(session.record["config"])
         noise = args.noise_deg or 0.0
     elif args.clip is not None:
@@ -139,6 +136,7 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
     config = dataclasses.replace(base, **overrides)
 
     metadata = {
+        **({} if session is None else session.record.get("metadata", {})),
         "replay": {
             "env": args.env,
             "model": None if args.model is None else str(args.model),
@@ -146,21 +144,25 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
             "session": None if args.session is None else str(args.session),
             "noise_deg": noise,
             "seed": args.seed,
-        }
+        },
     }
     frames, wall0 = [], time.perf_counter()
-    with ShadowModel(model, config, log_dir=args.log_dir, metadata=metadata) as shadow:
-        for k, (t, q) in enumerate(zip(times, qpos)):
-            if args.realtime:
-                time.sleep(max(0.0, t - times[0] - (time.perf_counter() - wall0)))
-            frame = shadow.push(
-                float(t),
-                q,
-                None if external is None else external[k],
-                flags=0 if flags is None else int(flags[k]),
-            )
-            if frame is not None:
-                frames.append(frame)
+    with ShadowModel(
+        model,
+        config,
+        log_dir=args.log_dir,
+        metadata=metadata,
+        calibration=None if session is None else session.record.get("calibration", {}),
+    ) as shadow:
+        if session is not None:
+            frames.extend(session.replay(shadow, qpos=qpos, realtime=args.realtime))
+        else:
+            for k, (t, q) in enumerate(zip(times, qpos)):
+                if args.realtime:
+                    time.sleep(max(0.0, t - times[0] - (time.perf_counter() - wall0)))
+                frame = shadow.push(float(t), q)
+                if frame is not None:
+                    frames.append(frame)
     return frames
 
 
@@ -185,6 +187,7 @@ def _analysis_parsers(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("report", help="quality report of a recorded session")
     p.add_argument("--session", type=Path, required=True)
     p.add_argument("--json", type=Path, help="also write the report as JSON")
+    p.add_argument("--thresholds", type=Path, help="study warning thresholds as JSON")
     p = sub.add_parser("sensitivity", help="replay a session under calibration errors")
     p.add_argument("--session", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True, help="output directory")
@@ -203,7 +206,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     _analysis_parsers(sub)
     args = parser.parse_args(argv)
     if args.command == "report":
-        rep = session_report(args.session)
+        thresholds = None
+        if args.thresholds is not None:
+            thresholds = ReportThresholds(
+                **json.loads(args.thresholds.read_text(encoding="utf-8"))
+            )
+        rep = session_report(args.session, thresholds=thresholds)
         if args.json is not None:
             args.json.write_text(json.dumps(rep, indent=2), encoding="utf-8")
         print(format_report(rep), end="")
@@ -214,8 +222,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             *(Variant(f"window {w}", window=w) for w in args.window),
         )
         res = run_sensitivity(args.session, variants, out_dir=args.out)
-        for v, mf in zip(res.variants, res.fatigue):
-            print(f"{v.name:>20}: peak MF {mf.max():.3f}, final MF {mf[-1].max():.3f}")
+        for i, v in enumerate(res.variants):
+            if res.fatigue is None:
+                detail = "fatigue disabled"
+            elif not len(res.time):
+                detail = "no estimates"
+            else:
+                mf = res.fatigue[i]
+                if np.isfinite(mf).any():
+                    last = mf[-1][np.isfinite(mf[-1])]
+                    final = f"{last.max():.3f}" if len(last) else "unavailable"
+                    detail = f"peak MF {np.nanmax(mf):.3f}, final MF {final}"
+                else:
+                    detail = "no overlapping estimates"
+            print(f"{v.name:>20}: {detail}")
         print(f"summary.csv and bands.csv in {args.out}")
         return
     if args.session is not None and args.model is None and args.env is None:

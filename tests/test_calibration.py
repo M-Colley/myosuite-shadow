@@ -29,15 +29,15 @@ def test_strength_from_mvc_matches_the_measurement(elbow: mujoco.MjModel) -> Non
     model_flexion, flexors = max_joint_torque(elbow, qpos, "r_elbow_flex", 1.0)
     assert set(flexors) == {"BIClong", "BICshort", "BRA"}
     cal = strength_from_mvc(elbow, qpos, "r_elbow_flex", 1.3 * model_flexion)
-    assert cal.scale == pytest.approx(1.3)
-    scaled = scale_strength(elbow, cal.scale)
+    original_force = elbow.actuator_gainprm[0, 2]
+    scaled = scale_strength(elbow, cal.scale, cal.agonists)
     assert max_joint_torque(scaled, qpos, "r_elbow_flex", 1.0)[0] == pytest.approx(
         cal.measured_torque, rel=1e-9
     )
     # Extension MVCs calibrate against the triceps.
     ext = strength_from_mvc(elbow, qpos, "r_elbow_flex", -30.0)
     assert set(ext.agonists) == {"TRIlong", "TRIlat", "TRImed"} and ext.scale > 0
-    assert elbow.actuator_gainprm[0, 2] == scaled.actuator_gainprm[0, 2] / 1.3
+    assert elbow.actuator_gainprm[0, 2] == original_force
 
 
 def test_a_stronger_model_needs_less_activation(elbow: mujoco.MjModel) -> None:
@@ -103,4 +103,4 @@ def test_fitted_rates_reach_the_shadow_model(
         assert f.F[other] == default.F[other]
     record = read_session(tmp_path).record
     assert record["calibration"]["fatigue"]["F"] == fit.F
-    assert ShadowModelConfig.from_dict(record["config"]) == config
+    assert ShadowModelConfig.from_dict(record["config"]) == shadow.config

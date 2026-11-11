@@ -1,0 +1,50 @@
+{
+  "person_id": "P07",
+  "source_id": "sapiens2-study",
+  "coordinate_frame": "camera_world",
+  "inference": {
+    "upstream_revision": "REPLACE_WITH_ACTUAL_INFERENCE_COMMIT",
+    "model": "sapiens2_1b",
+    "checkpoint": {
+      "id": "REPLACE_WITH_ACTUAL_MODEL_OR_CHECKPOINT_ID",
+      "revision": "REPLACE_WITH_ACTUAL_CHECKPOINT_REVISION",
+      "sha256": "REPLACE_WITH_ACTUAL_64_DIGIT_CHECKPOINT_SHA256"
+    }
+  },
+  "reconstruction": {
+    "max_skew_s": 0.01,
+    "min_confidence": 0.5,
+    "max_reprojection_px": 5.0,
+    "min_ray_angle_deg": 1.0
+  },
+  "cameras": [
+    {
+      "id": "front",
+      "predictions": "front_predictions.json",
+      "timestamps": "front_times.json",
+      "instances": "front_instances.json",
+      "capture_unix": "front_capture_unix.json",
+      "images_undistorted": true,
+      "calibration": {
+        "intrinsic": [[600, 0, 320], [0, 600, 240], [0, 0, 1]],
+        "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "translation": [0, 0, 0],
+        "calibration_id": "REPLACE_WITH_FRONT_CALIBRATION_ID"
+      }
+    },
+    {
+      "id": "side",
+      "predictions": "side_predictions.json",
+      "timestamps": "side_times.json",
+      "instances": "side_instances.json",
+      "capture_unix": "side_capture_unix.json",
+      "images_undistorted": true,
+      "calibration": {
+        "intrinsic": [[600, 0, 320], [0, 600, 240], [0, 0, 1]],
+        "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "translation": [-0.8, 0, 0],
+        "calibration_id": "REPLACE_WITH_SIDE_CALIBRATION_ID"
+      }
+    }
+  ]
+}

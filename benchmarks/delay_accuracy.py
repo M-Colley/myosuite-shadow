@@ -17,9 +17,12 @@ import argparse
 
 import numpy as np
 from myosuite import make_env
-from myosuite.physics.inverse_dynamics import clip_kinematics
-from myosuite.physics.static_optimization import StaticOptimizer, static_optimization
-from myosuite.physics.streaming_kinematics import StreamingKinematics
+from myosuite.biomechanics.inverse_dynamics import clip_kinematics
+from myosuite.biomechanics.static_optimization import (
+    StaticOptimizer,
+    static_optimization,
+)
+from myosuite.biomechanics.streaming_kinematics import StreamingKinematics
 
 from myosuite_shadow import (
     ShadowModel,

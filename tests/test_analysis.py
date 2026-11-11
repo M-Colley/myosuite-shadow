@@ -87,7 +87,10 @@ def test_sensitivity_brackets_the_recorded_estimates(
 
     assert recovered(6) > recovered(0) > recovered(5) > 0.3
     lo, hi = res.band()
-    assert (lo <= res.fatigue[0]).all() and (res.fatigue[0] <= hi).all()
+    covered = np.isfinite(lo) & np.isfinite(hi)
+    assert covered.any() and not covered.all()
+    assert (lo[covered] <= res.fatigue[0][covered]).all()
+    assert (res.fatigue[0][covered] <= hi[covered]).all()
     assert res.fatigue.shape == (len(variants), len(recorded.time), elbow.nu)
     assert (tmp_path / "out" / "summary.csv").exists()
     assert (tmp_path / "out" / "bands.csv").read_text().count("\n") == len(
@@ -139,5 +142,5 @@ def test_residual_capacity_of_a_group(elbow: mujoco.MjModel, tmp_path: Path) -> 
     s = read_session(tmp_path)
     flexors = ["BIClong", "BICshort", "BRA"]
     rc = residual_capacity(s, flexors, np.array([10.0, 29.0, 89.0]))
-    assert 0 < rc[1] < rc[0] < 1
+    assert 0 < rc[1] < rc[0] < 1 and np.isnan(rc[2])
     assert np.isnan(residual_capacity(s, flexors, np.array([1e4]))[0])

@@ -10,6 +10,8 @@ the software (a dirty checkout or a moving dependency is a warning)::
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,87 @@ from myosuite_shadow.log import Session, read_session
 
 # Warning thresholds (fraction of estimates, or seconds).
 _MAX_UNSOLVED, _MAX_CAPACITY, _MAX_FLAGGED, _MAX_LATENCY = 0.01, 0.05, 0.10, 0.25
+
+
+@dataclass(frozen=True)
+class ReportThresholds:
+    """Study-specific warning thresholds; these do not establish human validity."""
+
+    unsolved_fraction: float = _MAX_UNSOLVED
+    capacity_fraction: float = _MAX_CAPACITY
+    flagged_fraction: float = _MAX_FLAGGED
+    latency_s: float = _MAX_LATENCY
+    reserve_rms_fraction: float = 0.05
+    required_calibrations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("unsolved_fraction", "capacity_fraction", "flagged_fraction"):
+            if (
+                not np.isfinite(getattr(self, name))
+                or not 0 <= getattr(self, name) <= 1
+            ):
+                raise ValueError(f"{name} must be within [0, 1]")
+        if (
+            not np.isfinite([self.latency_s, self.reserve_rms_fraction]).all()
+            or min(self.latency_s, self.reserve_rms_fraction) < 0
+        ):
+            raise ValueError("latency and reserve thresholds must be nonnegative")
+
+
+def _joint_quality(s: Session) -> list[dict[str, Any]]:
+    out = []
+    for joint in s.record["model"]["joints"]:
+        kind, start = joint["type"], joint["dofadr"]
+        count = 6 if kind == 0 else 3 if kind == 1 else 1
+        for axis in range(count):
+            reserve, torque = f"reserve_{start + axis}", f"tau_{start + axis}"
+            if reserve not in s.columns or not len(s.time):
+                continue
+            r, t = s.columns[reserve], s.columns[torque]
+            keep = np.isfinite(r) & np.isfinite(t)
+            if not keep.any():
+                continue
+            rms_r = float(np.sqrt(np.mean(r[keep] ** 2)))
+            rms_t = float(np.sqrt(np.mean(t[keep] ** 2)))
+            unit = "N" if kind == 2 or kind == 0 and axis < 3 else "Nm"
+            out.append(
+                {
+                    "joint": joint["name"],
+                    "axis": axis,
+                    "unit": unit,
+                    "free_root": kind == 0,
+                    "reserve_rms": rms_r,
+                    "required_rms": rms_t,
+                    "reserve_peak": float(np.abs(r[keep]).max()),
+                    "reserve_fraction_rms": rms_r / rms_t if rms_t > 1e-9 else None,
+                }
+            )
+    return out
+
+
+def _tracking_quality(log_dir: str | Path) -> dict[str, Any] | None:
+    path = Path(log_dir) / "tracking_quality.jsonl"
+    if not path.exists():
+        return None
+    total, rejected, corrupt = 0, 0, 0
+    reasons: dict[str, int] = {}
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+                total += 1
+                if not row["accepted"]:
+                    rejected += 1
+                    reason = row["reason"]
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            except (ValueError, KeyError, TypeError):
+                corrupt += 1
+    return {
+        "frames": total,
+        "rejected": rejected,
+        "reasons": reasons,
+        "unreadable_rows": corrupt,
+    }
 
 
 def _percentiles(x: np.ndarray) -> dict[str, float] | None:
@@ -34,7 +117,10 @@ def _percentiles(x: np.ndarray) -> dict[str, float] | None:
 
 
 def session_report(
-    log_dir: str | Path, session: Session | None = None
+    log_dir: str | Path,
+    session: Session | None = None,
+    *,
+    thresholds: ReportThresholds | None = None,
 ) -> dict[str, Any]:
     """Quality summary of a session log.
 
@@ -98,28 +184,43 @@ def session_report(
             for k, v in s.record["packages"].items()
             if v.get("version") is not None
         },
+        "joint_quality": _joint_quality(s),
+        "tracking": _tracking_quality(log_dir),
+        "exact_schedule": s.operations is not None
+        and not s.record.get("schedule_reconstructed", False),
+        "live_latency": not (
+            s.record.get("metadata", {}).get("replay")
+            or s.record.get("metadata", {}).get("acquisition_mode")
+            == "offline_reprocess"
+        ),
     }
-    report["warnings"] = _warnings(report, s)
+    limits = thresholds or ReportThresholds()
+    report["thresholds"] = asdict(limits)
+    report["warnings"] = _warnings(report, s, limits)
     return report
 
 
-def _warnings(r: dict[str, Any], s: Session) -> list[str]:
+def _warnings(r: dict[str, Any], s: Session, limits: ReportThresholds) -> list[str]:
     out = []
     n = max(r["estimates"], 1)
     if not r["estimates"]:
         out.append("no estimates")
-    if r["unsolved"] / n > _MAX_UNSOLVED:
+    if r["unsolved"] / n > limits.unsolved_fraction:
         out.append(f"{r['unsolved']} estimates did not converge")
     cap = r["estimate_flags"]["CAPACITY_EXCEEDED"]
-    if cap / n > _MAX_CAPACITY:
+    if cap / n > limits.capacity_fraction:
         out.append(
             f"{cap / n:.0%} of estimates need reserves: load or strength "
             "miscalibrated, "
             "or tracking glitches"
         )
-    if r["flagged_estimates"] / n > _MAX_FLAGGED:
+    if r["flagged_estimates"] / n > limits.flagged_fraction:
         out.append(f"{r['flagged_estimates'] / n:.0%} of estimates carry quality flags")
-    if r["end_to_end_s"] and r["end_to_end_s"]["p95"] > _MAX_LATENCY:
+    if (
+        r["live_latency"]
+        and r["end_to_end_s"]
+        and r["end_to_end_s"]["p95"] > limits.latency_s
+    ):
         out.append(
             f"95th-percentile end-to-end latency {r['end_to_end_s']['p95']:.2f} s"
         )
@@ -144,6 +245,32 @@ def _warnings(r: dict[str, Any], s: Session) -> list[str]:
             "uncalibrated model: absolute activations and fatigue rates are "
             "population defaults"
         )
+    for key in limits.required_calibrations:
+        if key not in s.record.get("calibration", {}):
+            out.append(f"missing required calibration {key!r}")
+    if not r["exact_schedule"]:
+        out.append(
+            "legacy log lacks the original optimization/reset schedule; "
+            "replay is a recomputation"
+        )
+    for joint in r["joint_quality"]:
+        ratio = joint["reserve_fraction_rms"]
+        if (
+            not joint["free_root"]
+            and ratio is not None
+            and ratio > limits.reserve_rms_fraction
+        ):
+            out.append(
+                f"{joint['joint']} axis {joint['axis']}: reserve RMS is "
+                f"{ratio:.0%} of required torque/force"
+            )
+    if r["estimate_flags"].get("INFERRED", 0):
+        out.append(
+            "estimates include inferred tracking landmarks; "
+            "validate those tasks separately"
+        )
+    if r["tracking"] and r["tracking"]["unreadable_rows"]:
+        out.append("raw tracking quality record has unreadable or torn rows")
     return out
 
 
@@ -186,6 +313,30 @@ def format_report(report: dict[str, Any]) -> str:
             "Peak MF: "
             + ", ".join(f"{k} {v:.2f}" for k, v in r["peak_fatigue"].items()),
         ]
+    if r.get("tracking"):
+        tracking = r["tracking"]
+        lines += [
+            "",
+            f"Raw acquisition: {tracking['frames']} frames, "
+            f"{tracking['rejected']} rejected before physics.",
+        ]
+    if not r.get("live_latency", True):
+        lines += [
+            "",
+            "Offline processing: capture-to-completion includes recording age.",
+        ]
+    if r.get("joint_quality"):
+        lines += [
+            "",
+            "| Joint | Axis | Reserve RMS | Required RMS | Unit | Root residual |",
+            "|---|---|---|---|---|---|",
+        ]
+        for joint in r["joint_quality"]:
+            lines.append(
+                f"| {joint['joint']} | {joint['axis']} | "
+                f"{joint['reserve_rms']:.3g} | {joint['required_rms']:.3g} | "
+                f"{joint['unit']} | {joint['free_root']} |"
+            )
     if r["events"]:
         lines += ["", "Events: " + ", ".join(r["events"])]
     lines += ["", "## Warnings", ""]
