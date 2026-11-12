@@ -228,3 +228,37 @@ def test_invalid_evaluation_time_is_rejected_before_logging(
         with pytest.raises(ValueError, match="timestamps must be finite"):
             shadow.push(0.0, [1.2], evaluation_unix=np.nan)
     assert len(read_session(tmp_path).input_time) == 0
+
+
+@pytest.mark.parametrize("samples", [0, 8])
+def test_passive_model_sessions_support_reading_replay_and_analysis(
+    tmp_path: Path, samples: int
+) -> None:
+    from myosuite_shadow.report import session_report
+    from myosuite_shadow.sensitivity import Variant, run_sensitivity
+
+    model = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody><body><joint name="joint"/>'
+        '<geom size=".1" mass="1"/></body></worldbody></mujoco>'
+    )
+    config = ShadowModelConfig(window=5, fatigue=False)
+    source = tmp_path / "source"
+    with ShadowModel(model, config, log_dir=source) as shadow:
+        for k in range(samples):
+            shadow.push(k / 20, [0.1 * k])
+    session = read_session(source)
+    count = max(0, samples - config.window + 1)
+    assert session.activation.shape == (count, 0)
+    assert session.fatigue is None
+    assert session_report(source)["estimates"] == count
+    with ShadowModel(model, config, log_dir=tmp_path / "replay") as replay:
+        frames = list(session.replay(replay))
+    assert len(frames) == count
+    result = run_sensitivity(
+        source,
+        [Variant("baseline"), Variant("different window", window=7)],
+        out_dir=tmp_path / "sensitivity",
+    )
+    assert result.activation.shape == (2, count, 0)
+    assert result.fatigue is None
+    assert (tmp_path / "sensitivity" / "bands.csv").exists()
