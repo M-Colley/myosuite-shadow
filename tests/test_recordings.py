@@ -192,10 +192,14 @@ def test_external_xml_change_is_detected_without_baseline(recording, tmp_path):
     assert not (tmp_path / "result").exists()
 
 
-def test_clock_audit_counts_missing_to_declared_mapping(recording, tmp_path):
+@pytest.mark.parametrize("clock_key", ["clock_mapping", "clock"])
+def test_clock_audit_counts_missing_to_declared_mapping(recording, tmp_path, clock_key):
     raw = tmp_path / "frames.jsonl"
     rows = [json.loads(row) for row in raw.read_text().splitlines()]
-    rows[0]["metadata"].pop("clock_mapping")
+    for row in rows:
+        mapping = row["metadata"].pop("clock_mapping")
+        row["metadata"][clock_key] = mapping
+    rows[0]["metadata"].pop(clock_key)
     raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     freeze_recording(recording, tmp_path / "frozen.json")
     assert audit_recording(tmp_path / "frozen.json")["clock_changes"] == 2

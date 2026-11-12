@@ -151,7 +151,7 @@ def audit_recording(manifest_path: str | Path) -> dict[str, Any]:
         count += 1
         missing_receive += frame.receive_unix is None
         revisions.add((frame.transform_revision, frame.skeleton_revision))
-        clock = frame.metadata.get("clock_mapping")
+        clock = frame.metadata.get("clock_mapping", frame.metadata.get("clock"))
         if count > 1 and clock != prior_clock:
             clock_changes += 1
         prior_clock = clock
