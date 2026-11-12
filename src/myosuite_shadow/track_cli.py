@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> None:
             ClockMapping(**quest["clock"]),
             expected_source_id=quest.get("source_id"),
             expected_person_id=quest.get("person_id"),
+            expected_joint_set=quest.get("joint_set"),
         )
     if args.resume:
         recorded = SessionWriter.read_record(args.log_dir)

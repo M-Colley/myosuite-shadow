@@ -13,6 +13,7 @@ from myosuite_shadow.tracking import (
     QuestClockSynchronizer,
     synchronize_quest_clock,
 )
+from myosuite_shadow.tracking.quest_clock import validate_clock_sync_options
 
 
 def initial() -> ClockMapping:
@@ -24,6 +25,60 @@ def initial() -> ClockMapping:
         uncertainty_s=0.01,
         valid_until_source_s=100,
     )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"count": float("nan")},
+        {"count": 2},
+        {"count": 3.0},
+        {"count": True},
+        {"port": 0},
+        {"port": 65536},
+        {"port": True},
+        {"port": 9764.0},
+        {"session_epoch": float("inf")},
+        {"interval_s": float("nan")},
+        {"timeout_s": 0},
+        {"validity_s": float("inf")},
+        {"max_rtt_s": -1},
+        {"max_uncertainty_s": float("nan")},
+    ],
+)
+def test_invalid_options_fail_before_network_or_worker_start(options, monkeypatch):
+    def side_effect(*args, **kwargs):
+        pytest.fail("invalid options reached network or worker creation")
+
+    monkeypatch.setattr(
+        "myosuite_shadow.tracking.quest_clock.socket.socket", side_effect
+    )
+    monkeypatch.setattr(
+        "myosuite_shadow.tracking.quest_clock.threading.Thread", side_effect
+    )
+    with pytest.raises(ValueError):
+        validate_clock_sync_options(**options)
+    with pytest.raises(ValueError):
+        synchronize_quest_clock("unused", **options)
+    with pytest.raises(ValueError):
+        QuestClockSynchronizer("unused", initial=initial(), **options)
+
+
+@pytest.mark.parametrize("refresh", [0, -1, 60, 100, float("nan"), float("inf"), True])
+def test_invalid_refresh_schedule_is_rejected_by_shared_validation(refresh):
+    with pytest.raises(ValueError):
+        validate_clock_sync_options(refresh_s=refresh)
+    with pytest.raises(ValueError):
+        QuestClockSynchronizer("unused", initial=initial(), refresh_s=refresh)
+
+
+def test_one_shot_sentinel_and_scalar_checks_do_not_add_timing_budget_constraints():
+    validate_clock_sync_options(refresh_s=None, validity_s=0.01, session_epoch=-5)
+    validate_clock_sync_options(refresh_s=0.001, validity_s=0.01, count=3)
+    with pytest.raises(ValueError, match="requires refresh_s"):
+        QuestClockSynchronizer("unused", initial=initial(), refresh_s=None)
+    with pytest.raises(TypeError):
+        validate_clock_sync_options(unknown_option=1)
 
 
 def test_background_refresh_preserves_clock_identity_axis_and_closes():

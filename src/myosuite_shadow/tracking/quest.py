@@ -73,11 +73,15 @@ class QuestDecoder:
         *,
         expected_person_id: str | None = None,
         expected_source_id: str | None = None,
+        expected_joint_set: str | None = None,
         clock_provider: Callable[[], ClockMapping] | None = None,
     ) -> None:
         self.clock = clock
         self.expected_person_id = expected_person_id
         self.expected_source_id = expected_source_id
+        if expected_joint_set not in (None, "upper_body", "full_body"):
+            raise ValueError("expected_joint_set must be upper_body or full_body")
+        self.expected_joint_set = expected_joint_set
         self.clock_provider = clock_provider
 
     def decode(
@@ -106,6 +110,8 @@ class QuestDecoder:
         joint_set = packet.get("joint_set")
         if joint_set not in ("upper_body", "full_body"):
             raise ValueError("unknown Quest joint set")
+        if self.expected_joint_set is not None and joint_set != self.expected_joint_set:
+            raise ValueError("unexpected Quest joint set")
         capabilities = packet.get("capabilities", {})
         if not isinstance(capabilities, dict):
             raise ValueError("capabilities must be an object")
