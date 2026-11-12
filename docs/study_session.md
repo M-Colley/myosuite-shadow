@@ -134,3 +134,8 @@ record before any restoration changes the session.
 If checkpoint writing, file closure or a sink fails during `close()`, correct the
 I/O problem and call `close()` again. The model rejects new inputs once closing
 starts and continues remaining finalization without duplicating the live summary.
+
+After reviewing a recording, use the [recording regression workflow](recording_regression.md)
+to freeze its model, configuration, raw frames and annotations. Include synchronized
+held-out [instrument references](independent_references.md) when available; model
+input loads and repeatability baselines are not independent measurements.

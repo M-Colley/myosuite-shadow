@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,11 @@ class TrackedSession:
     The caller owns ``live`` and closes it after closing this acquisition layer.
     A reference-space or skeleton revision change requires renewed registration
     using ``set_registration`` before processing further frames.
+
+    ``clock`` optionally supplies a finite Unix policy time for reproducible
+    receipt-time reprocessing. The default calls the current ``now()`` each time.
+    ``external_loads(time_s, qpos)`` supplies known finite generalized forces for
+    accepted poses; it is mutually exclusive with a configured held mass.
     """
 
     def __init__(
@@ -73,9 +79,19 @@ class TrackedSession:
         registration: Registration | None = None,
         config: AcquisitionConfig | None = None,
         raw_dir: str | Path | None = None,
+        clock: Callable[[], float] | None = None,
+        external_loads: Callable[[float, np.ndarray], np.ndarray] | None = None,
     ) -> None:
         self.live, self.ik = live, ik
+        if clock is not None and not callable(clock):
+            raise TypeError("acquisition clock must be callable")
+        self._clock = clock
         self.config = config or AcquisitionConfig()
+        if external_loads is not None and not callable(external_loads):
+            raise TypeError("external loads must be callable")
+        if external_loads is not None and self.config.held_mass_kg:
+            raise ValueError("external loads cannot also include configured held mass")
+        self._external_loads = external_loads
         if registration is not None and registration.target_frame != "model_world":
             raise ValueError("acquisition registration must target model_world")
         if ik.model is not live.shadow.model and (
@@ -131,8 +147,18 @@ class TrackedSession:
             "ik": dataclasses.asdict(ik.config),
             "keypoints": [dataclasses.asdict(k) for k in ik.keypoints],
             "registration": None if registration is None else registration.record(),
+            "policy_clock": "injected" if clock is not None else "wall_clock",
+            "external_loads": "provider"
+            if external_loads is not None
+            else "configuration",
         }
         self.live.mark("tracking_setup", **setup)
+
+    def _now(self) -> float:
+        value = float(now() if self._clock is None else self._clock())
+        if not np.isfinite(value):
+            raise ValueError("acquisition clock must be finite")
+        return value
 
     def _write(self, index: int, record: dict[str, Any]) -> None:
         if self._files:
@@ -157,6 +183,7 @@ class TrackedSession:
             raise TypeError("acquisition requires metric 3D TrackerFrame observations")
         if self._raw is not None:
             self._raw.write(frame)
+        observed_time = self._now()
         reason = None
         identity = (frame.source_id, frame.person_id)
         if self._identity is not None and identity != self._identity:
@@ -192,8 +219,8 @@ class TrackedSession:
             self.config.check_wallclock
             and stamp is not None
             and (
-                now() - stamp > self.config.max_age_s
-                or stamp > now() + self.config.max_clock_uncertainty_s
+                observed_time - stamp > self.config.max_age_s
+                or stamp > observed_time + self.config.max_clock_uncertainty_s
             )
         ):
             time_admissible = False
@@ -269,6 +296,26 @@ class TrackedSession:
             result = self.ik.solve(normalized.time_s, positions, normalized.confidence)
             if not result.usable:
                 reason = "ik_quality"
+        external = None
+        if reason is None:
+            if self._external_loads is not None:
+                external = np.asarray(
+                    self._external_loads(frame.time_s, result.qpos.copy()), dtype=float
+                ).copy()
+                if (
+                    external.shape != (self.ik.model.nv,)
+                    or not np.isfinite(external).all()
+                ):
+                    raise ValueError("external loads require a finite model.nv vector")
+            if self.config.held_mass_kg:
+                from myosuite.biomechanics.external_loads import held_mass_qfrc
+
+                external = held_mass_qfrc(
+                    self.ik.model,
+                    result.qpos,
+                    self.config.held_mass_kg,
+                    site=self.config.load_site,
+                )
         decision = {
             "source_id": frame.source_id,
             "person_id": frame.person_id,
@@ -287,16 +334,6 @@ class TrackedSession:
             if self.rejected == 1:
                 self.live.mark("tracking_rejected", reason=reason)
             return False
-        external = None
-        if self.config.held_mass_kg:
-            from myosuite.biomechanics.external_loads import held_mass_qfrc
-
-            external = held_mass_qfrc(
-                self.ik.model,
-                result.qpos,
-                self.config.held_mass_kg,
-                site=self.config.load_site,
-            )
         flags = result.flags | (
             Flag.INFERRED if inferred or frame.prediction_s > 0 else Flag.NONE
         )
@@ -311,7 +348,7 @@ class TrackedSession:
         )
         self.accepted += 1
         self._last_rejection = None
-        self._last_accepted_unix = now()
+        self._last_accepted_unix = observed_time
         return True
 
     @property
@@ -321,7 +358,7 @@ class TrackedSession:
         age = (
             None
             if self._last_accepted_unix is None
-            else now() - self._last_accepted_unix
+            else self._now() - self._last_accepted_unix
         )
         result.update(
             accepted=self.accepted,

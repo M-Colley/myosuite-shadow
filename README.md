@@ -197,6 +197,12 @@ unobserved endpoints and gaps as missing; scenario bounds are not confidence
 intervals. See [validation_study.md](docs/validation_study.md) for the evidence
 needed to support claims about people.
 
+Run [study preflight](docs/preflight.md) before acquisition. Preserve reviewed
+recordings with the [recording regression workflow](docs/recording_regression.md)
+and compare held-out force, dynamometer or EMG exports using
+[independent references](docs/independent_references.md). These tools retain
+provenance and missing samples; study accuracy requires actual measurements.
+
 ## Historical benchmarks (0.2)
 
 
