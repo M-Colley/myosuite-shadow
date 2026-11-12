@@ -766,6 +766,8 @@ def read_session(log_dir: str | Path) -> Session:
 
     def block(prefix: str) -> np.ndarray | None:
         keys = [f"{prefix}{n}" for n in names]
+        if not keys:
+            return np.empty((len(rows), 0)) if prefix == "a_" else None
         if keys[0] not in by_name:
             return None
         return np.array([_float(by_name[k]) for k in keys]).T.reshape(-1, nu)
