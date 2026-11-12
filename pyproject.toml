@@ -49,6 +49,7 @@ myosuite-shadow = "myosuite_shadow.cli:main"
 myosuite-shadow-track = "myosuite_shadow.track_cli:main"
 myosuite-shadow-validate = "myosuite_shadow.study:main"
 myosuite-shadow-preflight = "myosuite_shadow.preflight:main"
+myosuite-shadow-recordings = "myosuite_shadow.recordings_cli:main"
 
 [tool.hatch.version]
 path = "src/myosuite_shadow/__init__.py"

@@ -61,10 +61,14 @@ in external XML/mesh assets cannot bypass the top-level file hash.
 Run these commands from the project environment:
 
 ```powershell
-python examples/recordings/check_recording.py freeze D:\study\draft.json D:\study\frozen.json
-python examples/recordings/check_recording.py audit D:\study\frozen.json
-python examples/recordings/check_recording.py run D:\study\frozen.json D:\study\regression01
+myosuite-shadow-recordings freeze D:\study\draft.json D:\study\frozen.json
+myosuite-shadow-recordings audit D:\study\frozen.json
+myosuite-shadow-recordings run D:\study\frozen.json D:\study\regression01
 ```
+
+The repository example `python examples/recordings/check_recording.py` delegates
+to the same installed command. Invalid inputs exit 2; failed software comparisons
+exit 1. The audit command verifies evidence and does not report scientific success.
 
 Freeze resolves paths, hashes files with SHA256, and records installed software
 provenance. It never copies participant data or overwrites a frozen manifest.
