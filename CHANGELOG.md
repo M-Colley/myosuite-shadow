@@ -46,6 +46,8 @@ MyoSuite release or a completed participant validation.
   in recovery sidecars before continuing complete records.
   Raw-frame reprocessing refuses to read the session's own acquisition output,
   including filesystem aliases, before changing session files.
+  Sessions from models without actuators retain empty activation arrays through
+  reading, replay, reporting and sensitivity analysis.
 - **Worker lifecycle.** Timed close leaves resources open while the worker is
   active; completed close is idempotent. Health reports age, stale/error status,
   queue and drops. Queued resets preserve order. `drain()` waits explicitly for
