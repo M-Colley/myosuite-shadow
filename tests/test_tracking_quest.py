@@ -50,6 +50,19 @@ def decoder() -> QuestDecoder:
     )
 
 
+def test_declared_joint_layout_must_match_actual_packet():
+    value = QuestDecoder(
+        ClockMapping(100, 2, "android_monotonic"), expected_joint_set="upper_body"
+    )
+    assert value.decode(packet()).metadata["joint_set"] == "upper_body"
+    with pytest.raises(ValueError, match="unexpected Quest joint set"):
+        value.decode(packet("full_body"))
+    with pytest.raises(ValueError, match="expected_joint_set"):
+        QuestDecoder(
+            ClockMapping(100, 2, "android_monotonic"), expected_joint_set="other"
+        )
+
+
 @pytest.mark.parametrize(
     "device,sdk,joint_set",
     [
