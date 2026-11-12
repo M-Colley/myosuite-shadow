@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
-import mujoco
-
-from myosuite_shadow.acquisition import AcquisitionConfig, TrackedSession
-from myosuite_shadow.ik import IKConfig, Keypoint, KeypointIK
+from myosuite_shadow.acquisition import TrackedSession
 from myosuite_shadow.live import LiveShadowModel
 from myosuite_shadow.log import SessionWriter
 from myosuite_shadow.pipeline import ShadowModel, ShadowModelConfig
@@ -19,10 +15,10 @@ from myosuite_shadow.tracking import (
     ClockMapping,
     QuestClockSynchronizer,
     QuestDecoder,
-    Registration,
     UdpSource,
     read_frames,
 )
+from myosuite_shadow.tracking_config import load_tracking_setup
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -57,27 +53,10 @@ def main(argv: list[str] | None = None) -> None:
             and args.frames.samefile(tracking_output)
         ):
             parser.error("--frames must differ from the session tracking.jsonl output")
-    settings = json.loads(args.config.read_text(encoding="utf-8-sig"))
-    model_path = Path(settings["model"])
-    if not model_path.is_absolute():
-        model_path = args.config.parent / model_path
-    model = (
-        mujoco.MjModel.from_binary_path(str(model_path))
-        if model_path.suffix == ".mjb"
-        else mujoco.MjModel.from_xml_path(str(model_path))
-    )
-    ik_values = dict(settings.get("ik", {}))
-    if "required_keypoints" in ik_values:
-        ik_values["required_keypoints"] = tuple(ik_values["required_keypoints"])
-    ik = KeypointIK(
-        model, [Keypoint(**p) for p in settings["keypoints"]], IKConfig(**ik_values)
-    )
-    registration = (
-        Registration(**settings["registration"]) if "registration" in settings else None
-    )
-    policy = AcquisitionConfig(**settings.get("acquisition", {}))
+    setup = load_tracking_setup(args.config, offline=args.frames is not None)
+    settings, model, ik = setup.settings, setup.model, setup.ik
+    registration, policy = setup.registration, setup.acquisition
     if args.frames is not None:
-        policy = dataclasses.replace(policy, check_wallclock=False)
         decoder = None
     else:
         quest = settings["quest"]
