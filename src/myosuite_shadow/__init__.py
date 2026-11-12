@@ -16,7 +16,7 @@ from myosuite_shadow.motions import add_tracking_noise, reaching_motion
 from myosuite_shadow.pipeline import ShadowFrame, ShadowModel, ShadowModelConfig
 from myosuite_shadow.report import format_report, session_report
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Flag",

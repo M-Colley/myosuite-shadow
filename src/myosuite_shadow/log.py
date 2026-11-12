@@ -9,9 +9,11 @@ A log directory holds
   time, wall-clock times, update cost, solver status, quality flags, untracked
   gap integrated before it, skipped frames, peak reserve and root residual,
   activations, ``MF``, chosen bodies' contact forces);
-* ``inputs.csv``: every pose pushed (time, receive and capture wall-clock
+* ``inputs.csv``: every pose pushed (time, receive, capture and evaluation wall-clock
   times, flags, ``qpos``, known external generalized force), so a session can be
   replayed offline with other settings;
+* ``operations.jsonl``: input optimization decisions, explicit tracking resets
+  and the initial fatigue state, preserving the live processing schedule;
 * ``events.csv``: experimenter markers (wall-clock and session time, label, JSON);
 * ``checkpoint.json``: the pipeline state and file offsets, rewritten atomically
   every ``checkpoint_every`` seconds, from which a crashed session resumes;
@@ -31,6 +33,8 @@ import json
 import os
 import platform
 import subprocess
+import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
@@ -43,7 +47,7 @@ import mujoco
 import numpy as np
 
 if TYPE_CHECKING:
-    from myosuite_shadow.pipeline import ShadowFrame
+    from myosuite_shadow.pipeline import ShadowFrame, ShadowModel
 
 RECORD, ESTIMATES, INPUTS, EVENTS, CHECKPOINT, MODEL = (
     "record.json",
@@ -53,6 +57,7 @@ RECORD, ESTIMATES, INPUTS, EVENTS, CHECKPOINT, MODEL = (
     "checkpoint.json",
     "model.mjb",
 )
+OPERATIONS = "operations.jsonl"
 _PACKAGES = (
     "myosuite-shadow",
     "myosuite",
@@ -97,7 +102,14 @@ def _git_state(path: Path) -> dict[str, Any]:
             check=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"],
+            [
+                "git",
+                "-C",
+                str(path),
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -217,6 +229,11 @@ class SessionWriter:
             raise FileExistsError(f"{log_dir} already holds a session; use resume")
         self.log_dir = log_dir
         record = {
+            "schedule_version": 1,
+            "frame_unix_semantics": (
+                "measured capture_unix; otherwise tracked/predicted "
+                "evaluation_unix; otherwise receive_unix"
+            ),
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -239,13 +256,20 @@ class SessionWriter:
         if fatigue:
             header += [f"mf_{n}" for n in names]
         header += [f"contact_{b}_{x}" for b in contact_bodies for x in "xyz"]
+        header += [f"reserve_{i}" for i in range(model.nv)]
+        header += [f"tau_{i}" for i in range(model.nv)]
         inputs = INPUT_COLUMNS + [f"qpos_{i}" for i in range(model.nq)]
         inputs += [f"qfrc_ext_{i}" for i in range(model.nv)]
+        inputs += ["evaluation_unix"]
         self._files = {
             ESTIMATES: open(log_dir / ESTIMATES, "wb"),  # noqa: SIM115
             INPUTS: open(log_dir / INPUTS, "wb"),  # noqa: SIM115
             EVENTS: open(log_dir / EVENTS, "wb"),  # noqa: SIM115
+            OPERATIONS: open(log_dir / OPERATIONS, "wb"),  # noqa: SIM115
         }
+        self.input_count = 0
+        self._log_joint_details = True
+        self._log_evaluation_time = True
         for name, cols in (
             (ESTIMATES, header),
             (INPUTS, inputs),
@@ -256,8 +280,10 @@ class SessionWriter:
 
     @classmethod
     def reopen(
-        cls, log_dir: Path, nv: int
-    ) -> tuple[SessionWriter, dict[str, Any], list[list[str]]]:
+        cls, log_dir: Path, nv: int, *, fatigue_count: int | None = None
+    ) -> tuple[
+        SessionWriter, dict[str, Any], list[list[str]], list[dict[str, Any]] | None
+    ]:
         """Cut a crashed session back to its checkpoint and append from there.
 
         Inputs and estimates after the checkpoint are removed (the inputs are
@@ -268,22 +294,68 @@ class SessionWriter:
             nv: Degrees of freedom of the session's model.
 
         Returns:
-            The writer, the checkpoint, and the input rows after it.
+            Writer, checkpoint, pending input rows and their replay operations.
         """
         checkpoint = json.loads((log_dir / CHECKPOINT).read_text(encoding="utf-8"))
+        record = json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
         offsets = checkpoint["offsets"]
+        for name, offset in offsets.items():
+            path = log_dir / name
+            if (
+                not isinstance(offset, int)
+                or offset < 0
+                or not path.exists()
+                or offset > path.stat().st_size
+            ):
+                raise ValueError(f"invalid checkpoint file offset: {name}")
         pending = _complete_rows(log_dir / INPUTS, offsets[INPUTS])
+        operations = None
+        has_schedule = OPERATIONS in offsets and (log_dir / OPERATIONS).exists()
+        if record.get("schedule_version") and not has_schedule:
+            raise ValueError("session replay schedule is missing")
+        if has_schedule:
+            all_input_rows = _complete_rows(log_dir / INPUTS, 0)
+            all_ops = (log_dir / OPERATIONS).read_bytes()
+            validate_operations(
+                _read_operations_bytes(all_ops),
+                len(all_input_rows) - 1,
+                fatigue_count=fatigue_count,
+            )
+            raw_ops = all_ops[offsets[OPERATIONS] :]
+            operations = _read_operations_bytes(raw_ops)
+            restored_count = len(all_input_rows) - 1 - len(pending)
+            operations = [
+                dict(op, input=op["input"] - restored_count) for op in operations
+            ]
+            validate_operations(operations, len(pending))
+            _truncate(log_dir / OPERATIONS, offsets[OPERATIONS])
         _truncate(log_dir / INPUTS, offsets[INPUTS])
         _truncate(log_dir / ESTIMATES, offsets[ESTIMATES])
         events = (log_dir / EVENTS).read_bytes()
         _truncate(log_dir / EVENTS, events.rfind(b"\n") + 1)
         self = cls.__new__(cls)
         self.log_dir, self.nv = log_dir, nv
+        input_header, input_rows = _read_csv(log_dir / INPUTS)
+        self.input_count = len(input_rows)
+        self._log_evaluation_time = "evaluation_unix" in input_header
+        self._log_joint_details = "reserve_0" in _read_csv(log_dir / ESTIMATES)[0]
         self._files = {
             name: open(log_dir / name, "ab")  # noqa: SIM115
             for name in (ESTIMATES, INPUTS, EVENTS)
         }
-        record = json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
+        # A legacy resume starts a schedule covering its existing inputs too.
+        if not has_schedule:
+            with open(log_dir / OPERATIONS, "wb") as f:
+                for i in range(self.input_count):
+                    f.write(
+                        (
+                            json.dumps({"kind": "pose", "input": i, "estimate": True})
+                            + "\n"
+                        ).encode()
+                    )
+        self._files[OPERATIONS] = open(log_dir / OPERATIONS, "ab")
+        if not has_schedule:
+            record["schedule_reconstructed"] = True
         record["resumes"].append(
             {
                 "resumed_utc": datetime.now(timezone.utc).isoformat(),
@@ -293,7 +365,7 @@ class SessionWriter:
             }
         )
         _write_json(log_dir / RECORD, record)
-        return self, checkpoint, pending
+        return self, checkpoint, pending, operations
 
     def _write(self, name: str, row: list[Any]) -> None:
         f = self._files[name]
@@ -308,13 +380,32 @@ class SessionWriter:
         flags: int,
         qpos: np.ndarray,
         external_qfrc: np.ndarray | None,
+        *,
+        estimate: bool = True,
+        evaluation_unix: float | None = None,
     ) -> None:
         """Append one pushed pose; no external load is written as zeros."""
         ext = np.zeros(self.nv) if external_qfrc is None else external_qfrc
         row = [float(time_s), float(receive_unix), _num(capture_unix), int(flags)]
         row += np.asarray(qpos, dtype=np.float64).tolist()
         row += np.asarray(ext, dtype=np.float64).tolist()
+        if self._log_evaluation_time:
+            row += [_num(evaluation_unix)]
+        self.write_operation(
+            "pose", estimate=bool(estimate), evaluation_unix=evaluation_unix
+        )
         self._write(INPUTS, row)
+        self.input_count += 1
+
+    def write_operation(self, kind: str, **data: Any) -> None:
+        """Write a replay decision before its input or state change is applied."""
+        f = self._files[OPERATIONS]
+        f.write(
+            (
+                json.dumps({"kind": kind, "input": self.input_count, **data}) + "\n"
+            ).encode("utf-8")
+        )
+        f.flush()
 
     def write_estimate(
         self,
@@ -342,6 +433,9 @@ class SessionWriter:
         row += res.activation.tolist()
         row += [] if frame.fatigue is None else frame.fatigue.tolist()
         row += contact_force.ravel().tolist()
+        if self._log_joint_details:
+            row += res.reserve.tolist()
+            row += res.joint_torque.tolist()
         self._write(ESTIMATES, row)
 
     def write_event(
@@ -398,8 +492,8 @@ class Session:
         input_time: ``(m,)`` timestamps of every pushed pose [s].
         input_qpos: ``(m, nq)`` pushed poses.
         input_qfrc: ``(m, nv)`` known external generalized forces.
-        input_columns: ``receive_unix``, ``capture_unix`` (NaN if unknown) and
-            ``flags`` of every pose.
+        input_columns: ``receive_unix``, ``capture_unix``, ``evaluation_unix``
+            (NaN if unknown) and ``flags`` of every pose.
         events: Experimenter events as dicts (``unix``, ``session_time``,
             ``label``, ``data``).
         checkpoint: The last checkpoint (``closed`` is true after a clean close).
@@ -416,6 +510,46 @@ class Session:
     input_columns: dict[str, np.ndarray]
     events: list[dict[str, Any]] = field(default_factory=list)
     checkpoint: dict[str, Any] | None = None
+    operations: list[dict[str, Any]] | None = None
+
+    def replay(
+        self,
+        shadow: ShadowModel,
+        *,
+        qpos: np.ndarray | None = None,
+        realtime: bool = False,
+    ) -> Iterator[ShadowFrame]:
+        """Replay accepted inputs, optimization decisions and explicit resets.
+
+        Logs from 0.2 without an operation schedule use the original all-input
+        replay. Such logs cannot reconstruct an unrecorded live skip or reset.
+        """
+        poses = self.input_qpos if qpos is None else np.asarray(qpos)
+        if poses.shape != self.input_qpos.shape:
+            raise ValueError("replay qpos must match the recorded input shape")
+        inputs = [
+            (
+                float(t),
+                q,
+                ext,
+                int(flags),
+                _optional_time(capture),
+                float(receive),
+                _optional_time(evaluation),
+            )
+            for t, q, ext, flags, capture, receive, evaluation in zip(
+                self.input_time,
+                poses,
+                self.input_qfrc,
+                self.input_columns["flags"],
+                self.input_columns["capture_unix"],
+                self.input_columns["receive_unix"],
+                self.input_columns.get(
+                    "evaluation_unix", np.full(len(self.input_time), np.nan)
+                ),
+            )
+        ]
+        yield from replay_operations(shadow, inputs, self.operations, realtime=realtime)
 
     @property
     def time(self) -> np.ndarray:
@@ -466,6 +600,139 @@ def _float(values: list[str]) -> np.ndarray:
     return np.array([float(v) if v != "" else np.nan for v in values], dtype=float)
 
 
+def _optional_time(value: float) -> float | None:
+    return float(value) if np.isfinite(value) else None
+
+
+def _read_operations_bytes(data: bytes) -> list[dict[str, Any]]:
+    """Only newline-terminated records survive a process crash."""
+    data = data[: data.rfind(b"\n") + 1]
+    try:
+        return [json.loads(line) for line in data.decode("utf-8").splitlines() if line]
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid replay schedule record") from error
+
+
+def validate_operations(
+    operations: list[dict[str, Any]],
+    input_count: int,
+    *,
+    fatigue_count: int | None = None,
+) -> None:
+    """Require ordered, complete replay decisions before applying any of them.
+
+    One final pose decision may precede a torn input row. Resets after the last
+    complete pose are valid. A missing decision for a complete input is corrupt.
+    """
+    cursor, initial_seen = 0, False
+    for number, op in enumerate(operations):
+        if not isinstance(op, dict) or op.get("kind") not in {
+            "pose",
+            "reset",
+            "initial_fatigue",
+        }:
+            raise ValueError(f"unknown replay operation at record {number + 1}")
+        index = op.get("input")
+        if isinstance(index, bool) or not isinstance(index, int) or index != cursor:
+            raise ValueError(
+                f"replay operation index/order is invalid at record {number + 1}"
+            )
+        if op["kind"] == "pose":
+            if not isinstance(op.get("estimate"), bool):
+                raise ValueError("replay pose decisions require a boolean estimate")
+            evaluation = op.get("evaluation_unix")
+            if evaluation is not None and (
+                isinstance(evaluation, bool)
+                or not isinstance(evaluation, float | int)
+                or not np.isfinite(evaluation)
+            ):
+                raise ValueError("replay evaluation timestamp must be finite")
+            if cursor == input_count:
+                if number != len(operations) - 1:
+                    raise ValueError(
+                        "a replay decision without a complete input must be last"
+                    )
+                break
+            cursor += 1
+        elif op["kind"] == "initial_fatigue":
+            if cursor != 0 or initial_seen:
+                raise ValueError(
+                    "initial fatigue must be recorded once before the first input"
+                )
+            state = op.get("state")
+            if not isinstance(state, dict) or set(state) != {"MA", "MR", "MF"}:
+                raise ValueError("initial fatigue requires MA, MR and MF compartments")
+            try:
+                compartments = np.asarray(
+                    [state[k] for k in ("MA", "MR", "MF")], dtype=float
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("invalid initial fatigue compartments") from error
+            if compartments.ndim != 2 or not np.isfinite(compartments).all():
+                raise ValueError("invalid initial fatigue compartments")
+            if fatigue_count is not None and compartments.shape[1] != fatigue_count:
+                raise ValueError("initial fatigue does not match the model's muscles")
+            if (
+                np.any(compartments < 0)
+                or np.any(compartments > 1)
+                or not np.allclose(compartments.sum(axis=0), 1)
+            ):
+                raise ValueError("initial fatigue compartments must sum to one")
+            initial_seen = True
+    if cursor != input_count:
+        raise ValueError(
+            "replay schedule is missing pose decisions for complete inputs"
+        )
+
+
+def replay_operations(
+    shadow: ShadowModel,
+    inputs: Sequence[tuple],
+    operations: list[dict[str, Any]] | None,
+    *,
+    realtime: bool = False,
+) -> Iterator[ShadowFrame]:
+    """Apply one recorded schedule; used for replay, resume and sensitivity."""
+    if operations is None:
+        operations = [
+            {"kind": "pose", "input": i, "estimate": True} for i in range(len(inputs))
+        ]
+    validate_operations(
+        operations,
+        len(inputs),
+        fatigue_count=None
+        if shadow.fatigue is None
+        else len(shadow.fatigue.muscle_ids),
+    )
+    start = time.perf_counter()
+    first = inputs[0][0] if inputs else 0.0
+    for op in operations:
+        index = op["input"]
+        kind = op["kind"]
+        if kind == "reset":
+            shadow.reset_tracking()
+        elif kind == "initial_fatigue":
+            if shadow.fatigue is not None:
+                shadow.fatigue.load_state_dict(op["state"])
+        elif kind == "pose" and index < len(inputs):
+            t, q, ext, flags, capture, receive, *rest = inputs[index]
+            evaluation = op.get("evaluation_unix", rest[0] if rest else None)
+            if realtime:
+                time.sleep(max(0.0, t - first - (time.perf_counter() - start)))
+            frame = shadow.push(
+                t,
+                q,
+                ext,
+                flags=flags,
+                capture_unix=capture,
+                evaluation_unix=evaluation,
+                receive_unix=receive,
+                estimate=op["estimate"],
+            )
+            if frame is not None:
+                yield frame
+
+
 def read_session(log_dir: str | Path) -> Session:
     """Read a session log written by :class:`~myosuite_shadow.ShadowModel`.
 
@@ -489,6 +756,13 @@ def read_session(log_dir: str | Path) -> Session:
         c: (np.asarray(by_name[c], dtype=str) if c == "status" else _float(by_name[c]))
         for c in ESTIMATE_COLUMNS
     }
+    columns.update(
+        {
+            c: _float(by_name[c])
+            for c in header
+            if c.startswith("reserve_") or c.startswith("tau_")
+        }
+    )
 
     def block(prefix: str) -> np.ndarray | None:
         keys = [f"{prefix}{n}" for n in names]
@@ -509,6 +783,12 @@ def read_session(log_dir: str | Path) -> Session:
     data = np.array(
         [[float(v) if v != "" else np.nan for v in r] for r in in_rows], dtype=float
     ).reshape(-1, len(in_header))
+    input_columns = {c: data[:, i] for i, c in enumerate(INPUT_COLUMNS)}
+    input_columns["evaluation_unix"] = (
+        data[:, in_header.index("evaluation_unix")]
+        if "evaluation_unix" in in_header
+        else np.full(len(data), np.nan)
+    )
     events = []
     if (log_dir / EVENTS).exists():
         _, ev_rows = _read_csv(log_dir / EVENTS)
@@ -524,6 +804,12 @@ def read_session(log_dir: str | Path) -> Session:
     checkpoint = None
     if (log_dir / CHECKPOINT).exists():
         checkpoint = json.loads((log_dir / CHECKPOINT).read_text(encoding="utf-8"))
+    operations = None
+    if (log_dir / OPERATIONS).exists():
+        operations = _read_operations_bytes((log_dir / OPERATIONS).read_bytes())
+        validate_operations(operations, len(data))
+    elif record.get("schedule_version"):
+        raise ValueError("session replay schedule is missing")
     return Session(
         record=record,
         columns=columns,
@@ -532,8 +818,9 @@ def read_session(log_dir: str | Path) -> Session:
         contact_force=contact,
         input_time=data[:, 0],
         input_qpos=data[:, k : k + nq],
-        input_qfrc=data[:, k + nq :],
-        input_columns={c: data[:, i] for i, c in enumerate(INPUT_COLUMNS)},
+        input_qfrc=data[:, k + nq : k + nq + record["model"]["nv"]],
+        input_columns=input_columns,
         events=events,
         checkpoint=checkpoint,
+        operations=operations,
     )

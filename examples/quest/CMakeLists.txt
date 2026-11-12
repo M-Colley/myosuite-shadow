@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.22)
+project(shadow_quest_sender LANGUAGES CXX)
+# Add this subdirectory to an existing native OpenXR app with openxr_loader.
+add_library(shadow_quest_sender STATIC QuestBodySender.cpp)
+target_compile_features(shadow_quest_sender PUBLIC cxx_std_17)
+target_include_directories(shadow_quest_sender PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(shadow_quest_sender PUBLIC openxr_loader)
+if(WIN32)
+  target_link_libraries(shadow_quest_sender PRIVATE ws2_32)
+endif()

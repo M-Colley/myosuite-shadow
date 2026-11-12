@@ -2,8 +2,9 @@
 
 LSL synchronises clocks across machines, and LabRecorder writes every stream
 of a session (EMG, dynamometer, motion capture, these estimates) into one XDF
-file on a common time base. Estimates are stamped with the capture time of the
-frame they describe (else its receive time), converted to the LSL clock, so
+file on a common time base. Estimates use the frame's measured capture time,
+else its mapped tracked/predicted evaluation time, else its receive time,
+converted to the LSL clock, so
 they line up with EMG of the same instant despite the kinematics lag::
 
     shadow = ShadowModel(model, log_dir="logs/P07", sinks=(LslSink(model),))
