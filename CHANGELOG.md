@@ -2,8 +2,13 @@
 
 ## 0.3.0 (unreleased)
 
+- **Study preflight.** Checks required landmark observability on declared task
+  DOFs and postures, allowing free nuisance motion unless explicitly fixed.
+  Reports model/configuration hashes, resolved settings, registration, declared
+  calibrations and optional measured Quest clock continuity before acquisition.
+
 Pins the published MyoSuite source commit
-[`ba3e73f2d38305fcd7093e26bb85f07574451a4c`](https://github.com/MyoHub/myosuite/commit/ba3e73f2d38305fcd7093e26bb85f07574451a4c),
+[`87c1896b12b99683aecc83d6aab00cc66243a50f`](https://github.com/MyoHub/myosuite/commit/87c1896b12b99683aecc83d6aab00cc66243a50f),
 with optional editable development described in [development.md](docs/development.md).
 Reusable model calculations live in `myosuite.biomechanics`; shadow owns
 acquisition and study orchestration. This remains alpha software, not an official

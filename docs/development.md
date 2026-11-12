@@ -1,10 +1,11 @@
 # Installing and developing study support
 
 The default dependency is the published MyoSuite source commit
-[`ba3e73f2d38305fcd7093e26bb85f07574451a4c`](https://github.com/MyoHub/myosuite/commit/ba3e73f2d38305fcd7093e26bb85f07574451a4c),
-on `codex/calibration-review-fixes`. It provides the required
+[`87c1896b12b99683aecc83d6aab00cc66243a50f`](https://github.com/MyoHub/myosuite/commit/87c1896b12b99683aecc83d6aab00cc66243a50f),
+on `codex/study-observability-runtime`. It provides the required
 `myosuite.biomechanics.calibration`, `external_loads`, `streaming_kinematics`
-and `camera` interfaces. This source pin is not an official MyoSuite release.
+`camera` and `observability` interfaces. This source pin is not an official
+MyoSuite release.
 The shadow package remains alpha; software checks do not establish participant
 accuracy.
 
@@ -45,7 +46,7 @@ model package after synchronizing the frozen environment:
 
 ```bash
 git clone https://github.com/MyoHub/myosuite.git ../myosuite-study-support
-git -C ../myosuite-study-support checkout ba3e73f2d38305fcd7093e26bb85f07574451a4c
+git -C ../myosuite-study-support checkout 87c1896b12b99683aecc83d6aab00cc66243a50f
 uv pip install --no-deps --editable ../myosuite-study-support
 uv run --no-sync python -m pytest
 uv run --no-sync python -m pytest ../myosuite-study-support/myosuite/tests/test_subject_calibration.py ../myosuite-study-support/myosuite/tests/test_streaming_kinematics.py ../myosuite-study-support/myosuite/tests/test_camera_reconstruction.py
@@ -91,15 +92,15 @@ that remote CI has passed.
 
 ## Local verification baseline
 
-Shadow's final local suite passed **187 tests**, with Ruff lint/format and
+Shadow's preflight local suite passed **243 tests**, with Ruff lint/format and
 `uv lock --check` passing. The publication audit found no credentials, generated
 binaries, participant recordings or model weights among the candidate shadow
 changes. Full and targeted MyoSuite pre-commit hooks passed before the core commit
 was pushed.
 
 The combined MyoSuite checks on Windows, Python 3.12.7, MuJoCo 3.17.0 and NumPy
-2.5.4 produced **359 passed, 4 expected failures and 5 failures**, including the
-41 study-support tests. The five failures are four parity mismatches and a
+2.5.4 produced **372 passed, 4 expected failures and 5 failures**, including the
+54 study-support tests. The five failures are four parity mismatches and a
 registry check requiring unavailable KIT clips 971/972. All five were reproduced
 against the unchanged original `dev` checkout at
 `87f8ac4adb3498cefbbbb6b0fcabb76d16475d4f`, with tracked files clean and imports
