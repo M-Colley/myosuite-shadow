@@ -10,7 +10,8 @@ import mujoco
 import numpy as np
 import pytest
 
-from myosuite_shadow.log import read_session
+from myosuite_shadow import ShadowModel, ShadowModelConfig
+from myosuite_shadow.log import RECOVERY, SessionWriter, read_session
 from myosuite_shadow.track_cli import main
 from myosuite_shadow.tracking import RawFrameWriter, TrackerFrame
 
@@ -167,3 +168,44 @@ def test_resume_refuses_raw_input_output_alias_before_changing_session(
     assert error.value.code == 2
     assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
     assert len(tracked.read_text().splitlines()) == 2
+
+
+def test_pending_recovery_cli_preflight_is_readonly_then_valid_resume_keeps_inputs(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    config, _ = _fixture(elbow, tmp_path)
+    settings = json.loads(config.read_text())
+    settings["shadow"]["checkpoint_every"] = 1000
+    config.write_text(json.dumps(settings))
+    log = tmp_path / "session"
+    shadow = ShadowModel(
+        elbow, ShadowModelConfig.from_dict(settings["shadow"]), log_dir=log
+    )
+    for index in range(12):
+        shadow.push(index / 20, [1.2])
+    shadow.log.close_files()
+    writer, _, _, _ = SessionWriter.reopen(log, elbow.nv)
+    writer.close_files()
+    assert (log / RECOVERY).exists()
+    frames = tmp_path / "continuation.jsonl"
+    frames.write_text("")
+    settings["shadow"]["window"] = 9
+    config.write_text(json.dumps(settings))
+    before = {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    args = [
+        "--config",
+        str(config),
+        "--frames",
+        str(frames),
+        "--log-dir",
+        str(log),
+        "--resume",
+    ]
+    with pytest.raises(SystemExit):
+        main(args)
+    assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    settings["shadow"]["window"] = 5
+    config.write_text(json.dumps(settings))
+    main(args)
+    assert len(read_session(log).input_time) == 12
+    assert not (log / RECOVERY).exists()

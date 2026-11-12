@@ -60,6 +60,7 @@ class LiveShadowModel:
         self._stop = False
         self._error: BaseException | None = None
         self._closed = False
+        self._summary_written = False
         self._busy = False
         self._close_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -244,10 +245,11 @@ class LiveShadowModel:
                     "the worker is still running; call close again to finish"
                 )
             if not self._closed:
-                if self._error is None:
-                    self.shadow.mark(
+                if self._error is None and not self._summary_written:
+                    self.shadow._mark_final_event(
                         "live_summary", processed=self.processed, dropped=self.dropped
                     )
+                    self._summary_written = True
                 self.shadow.close()
                 self._closed = True
             if self._error is not None:

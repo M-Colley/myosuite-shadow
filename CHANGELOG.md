@@ -46,10 +46,15 @@ MyoSuite release or a completed participant validation.
   in recovery sidecars before continuing complete records.
   Raw-frame reprocessing refuses to read the session's own acquisition output,
   including filesystem aliases, before changing session files.
+  Resume preserves a durable recovery journal until replay and its checkpoint
+  commit. Interrupted recovery can be retried without losing pending poses;
+  configuration preflight reads original metadata without changing the logs.
 - **Worker lifecycle.** Timed close leaves resources open while the worker is
   active; completed close is idempotent. Health reports age, stale/error status,
   queue and drops. Queued resets preserve order. `drain()` waits explicitly for
   offline processing without stopping the worker.
+  Failed checkpoint, file or sink finalization can be retried. Closing rejects
+  new inputs and retains event progress so the live summary is recorded once.
 - **Study quality.** Per-DOF reserves and required torques identify the joint
   behind a reserve warning; root residuals remain separate. Reports include raw
   tracking acceptance/reasons and protocol-specific JSON thresholds. Recorded
