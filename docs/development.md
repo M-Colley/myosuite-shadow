@@ -94,11 +94,17 @@ that remote CI has passed.
 
 ## Local verification baseline
 
-Shadow's combined local suite passed **262 tests**, with Ruff lint/format and
+Shadow's combined local suite passed **353 tests**, with Ruff lint/format and
 `uv lock --check` passing. The publication audit found no credentials, generated
 binaries, participant recordings or model weights among the candidate shadow
 changes. Full and targeted MyoSuite pre-commit hooks passed before the core commit
 was pushed.
+
+The reusable-study layer adds durable protocol/trial journals, trial coverage
+and outcome reports, participant/study contrasts and declared-lineage checks.
+Its fixtures are synthetic. All 54 paired core regressions pass in the frozen
+environment; real participant accuracy remains unvalidated. The installed
+`myosuite-shadow-studies` command is exercised in CI.
 
 The combined MyoSuite checks on Windows, Python 3.12.7, MuJoCo 3.17.0 and NumPy
 2.5.4 produced **372 passed, 4 expected failures and 5 failures**, including the

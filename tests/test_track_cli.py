@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 
 from myosuite_shadow import ShadowModel, ShadowModelConfig
 from myosuite_shadow.log import RECOVERY, SessionWriter, read_session
+from myosuite_shadow.study_protocol import StudyDefinition, TrialJournal
 from myosuite_shadow.track_cli import main
 from myosuite_shadow.tracking import RawFrameWriter, TrackerFrame
 
@@ -73,6 +75,182 @@ def test_offline_raw_frames_have_no_machine_dependent_backlog(
     assert a.columns["skipped"].sum() == 0
     np.testing.assert_array_equal(a.activation, b.activation)
     np.testing.assert_array_equal(a.input_qpos, b.input_qpos)
+
+
+def test_study_capture_context_and_automatic_trial_report(elbow, tmp_path):
+    from myosuite_shadow.study_analysis import study_report
+    from myosuite_shadow.study_catalog import StudyCatalog
+
+    config, raw = _fixture(elbow, tmp_path)
+    definition = StudyDefinition.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "synthetic_capture",
+            "protocol_version": "1",
+            "conditions": {"hold": {"mass_kg": 0}},
+            "trials": [{"trial_id": "hold1", "condition": "hold"}],
+            "quality": {"min_coverage": 0.5},
+            "outcomes": [
+                {
+                    "name": "torque",
+                    "selector": "tau_0",
+                    "semantic_id": "synthetic.elbow.required_torque",
+                    "unit": "Nm",
+                    "coordinate_frame": "model_joint",
+                    "normalization": "none",
+                    "method_version": "synthetic_v1",
+                    "statistic": "time_mean",
+                }
+            ],
+        }
+    )
+    journal = TrialJournal.create(
+        tmp_path / "study.sqlite",
+        definition,
+        participant_id="SYNTHETIC_P01",
+        run_id="r1",
+    )
+    journal.start("hold1", 0.0)
+    journal.end(1.0)
+    log = tmp_path / "session"
+    main(
+        [
+            "--config",
+            str(config),
+            "--frames",
+            str(raw),
+            "--log-dir",
+            str(log),
+            "--study-run",
+            str(journal.path),
+        ]
+    )
+    report = study_report(journal.path)
+    assert read_session(log).record["metadata"]["study"] == journal.context
+    assert report["trials"][0]["quality"]["raw_frames"] == 20
+    assert report["trials"][0]["quality"]["status"] == "usable"
+    assert "study_preflight" in read_session(log).record["metadata"]
+    assert np.isfinite(report["trials"][0]["outcomes"]["torque"]["value"])
+    with StudyCatalog(tmp_path / "catalog.sqlite") as catalog:
+        assert len(catalog.add(report)) == 64
+        assert catalog.list()[0]["definition_sha256"] == definition.sha256
+
+
+def test_study_model_requirement_fails_before_capture_or_binding(elbow, tmp_path):
+    config, raw = _fixture(elbow, tmp_path)
+    definition = StudyDefinition.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "wrong_model",
+            "protocol_version": "1",
+            "conditions": {"a": {}},
+            "trials": [{"trial_id": "a1", "condition": "a"}],
+            "outcomes": [],
+            "requirements": {"model_sha256": "0" * 64},
+        }
+    )
+    journal = TrialJournal.create(
+        tmp_path / "study.sqlite",
+        definition,
+        participant_id="SYNTHETIC_P01",
+        run_id="r1",
+    )
+    log = tmp_path / "never_opened"
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--config",
+                str(config),
+                "--frames",
+                str(raw),
+                "--log-dir",
+                str(log),
+                "--study-run",
+                str(journal.path),
+            ]
+        )
+    assert not log.exists()
+    assert journal.session_path is None
+
+
+def test_study_resume_cannot_omit_journal_or_change_frozen_config(elbow, tmp_path):
+    config, raw = _fixture(elbow, tmp_path)
+    definition = StudyDefinition.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "frozen",
+            "protocol_version": "1",
+            "conditions": {"a": {}},
+            "trials": [{"trial_id": "a1", "condition": "a"}],
+            "outcomes": [],
+            "requirements": {
+                "tracking_config_sha256": hashlib.sha256(
+                    config.read_bytes()
+                ).hexdigest()
+            },
+        }
+    )
+    journal = TrialJournal.create(
+        tmp_path / "study.sqlite",
+        definition,
+        participant_id="SYNTHETIC_P01",
+        run_id="r1",
+    )
+    log = tmp_path / "session"
+    args = ["--config", str(config), "--frames", str(raw), "--log-dir", str(log)]
+    main(args + ["--study-run", str(journal.path)])
+    before = {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    with pytest.raises(SystemExit):
+        main(args + ["--resume"])
+    settings = json.loads(config.read_text())
+    settings["acquisition"] = {"max_age_s": 0.5}
+    config.write_text(json.dumps(settings))
+    with pytest.raises(SystemExit):
+        main(args + ["--resume", "--study-run", str(journal.path)])
+    assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+
+
+@pytest.mark.parametrize("evidence", [None, {}, [], "", False, 0])
+def test_empty_required_calibration_is_rejected_before_binding(
+    elbow, tmp_path, evidence
+):
+    config, raw = _fixture(elbow, tmp_path)
+    settings = json.loads(config.read_text())
+    settings["calibration"] = {"strength": evidence}
+    config.write_text(json.dumps(settings))
+    definition = StudyDefinition.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "calibration",
+            "protocol_version": "1",
+            "conditions": {"a": {}},
+            "trials": [{"trial_id": "a1", "condition": "a"}],
+            "outcomes": [],
+            "requirements": {"required_calibrations": ["strength"]},
+        }
+    )
+    journal = TrialJournal.create(
+        tmp_path / "study.sqlite",
+        definition,
+        participant_id="SYNTHETIC_P01",
+        run_id="r1",
+    )
+    log = tmp_path / "never_opened"
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--config",
+                str(config),
+                "--frames",
+                str(raw),
+                "--log-dir",
+                str(log),
+                "--study-run",
+                str(journal.path),
+            ]
+        )
+    assert not log.exists()
+    assert journal.session_path is None
 
 
 def test_resume_config_is_checked_before_modifying_session_files(
