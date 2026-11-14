@@ -36,8 +36,9 @@ ik = ["mink>=1.0"]
 lsl = ["pylsl>=1.16"]
 # XDF import and agreement statistics (myosuite_shadow.validation).
 validation = ["pyxdf>=1.16", "pingouin>=0.5.4", "pandas>=2"]
-all = ["myosuite-shadow[ik,lsl,validation]"]
-test = ["pytest>=8", "ruff==0.4.4", "myosuite-shadow[ik,lsl,validation]"]
+bridge = ["mink>=1.0", "websockets>=13"]
+all = ["myosuite-shadow[ik,lsl,validation,bridge]"]
+test = ["pytest>=8", "ruff==0.4.4", "myosuite-shadow[ik,lsl,validation,bridge]"]
 
 [project.urls]
 Homepage = "https://github.com/M-Colley/myosuite-shadow"
@@ -51,6 +52,7 @@ myosuite-shadow-validate = "myosuite_shadow.study:main"
 myosuite-shadow-preflight = "myosuite_shadow.preflight:main"
 myosuite-shadow-recordings = "myosuite_shadow.recordings_cli:main"
 myosuite-shadow-studies = "myosuite_shadow.studies_cli:main"
+myosuite-shadow-body = "myosuite_shadow.body_cli:main"
 
 [tool.hatch.version]
 path = "src/myosuite_shadow/__init__.py"
