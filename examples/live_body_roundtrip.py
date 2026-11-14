@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from collections import deque
 from pathlib import Path
 
 from myosuite_shadow.body_cli import initialize, synthetic_stream
@@ -51,14 +52,23 @@ async def run(headset_python: Path, headset_repo: Path, out_dir: Path) -> None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            async with asyncio.timeout(15):
-                while True:
-                    line = (await process.stdout.readline()).decode(errors="replace")
-                    if not line:
-                        raise RuntimeError("gateway exited before listening")
-                    if "Full-body gateway listening at " in line:
-                        uri = line.split("listening at ", 1)[1].split(";", 1)[0]
-                        break
+            startup = deque(maxlen=20)
+            with (out_dir / f"gateway-{condition}-startup.log").open(
+                "x", encoding="utf-8"
+            ) as diagnostics:
+                async with asyncio.timeout(15):
+                    while True:
+                        line = (await process.stdout.readline()).decode(errors="replace")
+                        if not line:
+                            raise RuntimeError(
+                                "gateway exited before listening:\n" + "".join(startup)
+                            )
+                        startup.append(line)
+                        diagnostics.write(line)
+                        diagnostics.flush()
+                        if "Full-body gateway listening at " in line:
+                            uri = line.split("listening at ", 1)[1].split(";", 1)[0]
+                            break
             await synthetic_stream(config, uri, seconds=6.0)
             # Let the gateway flush the disconnect and feedback outcome.
             await asyncio.sleep(0.2)
@@ -134,7 +144,9 @@ def main() -> None:
     args = parser.parse_args()
     asyncio.run(
         run(
-            args.headset_python.resolve(),
+            # Preserve the venv executable symlink on Unix: resolving it would
+            # launch base Python and lose the separately installed gateway.
+            args.headset_python.absolute(),
             args.headset_repo.resolve(),
             args.out_dir.resolve(),
         )
