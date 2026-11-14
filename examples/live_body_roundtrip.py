@@ -58,7 +58,9 @@ async def run(headset_python: Path, headset_repo: Path, out_dir: Path) -> None:
             ) as diagnostics:
                 async with asyncio.timeout(15):
                     while True:
-                        line = (await process.stdout.readline()).decode(errors="replace")
+                        line = (await process.stdout.readline()).decode(
+                            errors="replace"
+                        )
                         if not line:
                             raise RuntimeError(
                                 "gateway exited before listening:\n" + "".join(startup)
