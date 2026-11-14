@@ -103,8 +103,13 @@ class ShadowModelConfig:
     reserve_limit: float = 1.0
     log_contact_bodies: tuple[str, ...] = ()
     checkpoint_every: float = 5.0
+    root_residual_force_limit: float | None = None  # N, per free-root force norm
+    root_residual_moment_limit: float | None = None  # N m, free-root moment norm
 
     def __post_init__(self) -> None:
+        for limit in (self.root_residual_force_limit, self.root_residual_moment_limit):
+            if limit is not None and (not np.isfinite(limit) or limit < 0):
+                raise ValueError("root residual limits must be finite and nonnegative")
         if self.gap_load not in ("rest", "hold"):
             raise ValueError(
                 f"gap_load must be 'rest' or 'hold', got {self.gap_load!r}"
@@ -424,16 +429,59 @@ class ShadowModel:
         )
         reserve = float(np.abs(res.reserve[~self._free]).max(initial=0.0))
         residual = float(np.abs(res.reserve[self._free]).max(initial=0.0))
-        if res.status != "solved":
+        tolerance = max(1e-8, 10 * self.config.optimization.tolerance)
+        muscles = self.model.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE
+        valid_candidate = (
+            res.status == "solved"
+            and np.isfinite(res.activation).all()
+            and np.all(res.activation[muscles] >= -tolerance)
+            and np.all(res.activation[muscles] <= 1 + tolerance)
+        )
+        if not valid_candidate:
             flags |= Flag.NOT_SOLVED
+        support_valid = True
+        for j in np.flatnonzero(self.model.jnt_type == mujoco.mjtJoint.mjJNT_FREE):
+            start = int(self.model.jnt_dofadr[j])
+            for offset, limit in (
+                (0, self.config.root_residual_force_limit),
+                (3, self.config.root_residual_moment_limit),
+            ):
+                value = np.linalg.norm(res.reserve[start + offset : start + offset + 3])
+                if limit is not None and (not np.isfinite(value) or value > limit):
+                    support_valid = False
+        if not support_valid:
+            flags |= Flag.ROOT_RESIDUAL
+        valid_load = valid_candidate and support_valid
         if reserve > self.config.reserve_limit:
             flags |= Flag.CAPACITY_EXCEEDED
         mf = None
         if f is not None:
-            load = res.activation[f.muscle_ids]
+            if valid_load:
+                load = np.clip(res.activation[f.muscle_ids], 0.0, 1.0)
+            else:
+                # A solver candidate is not evidence of muscle loading.
+                load = (
+                    self._load.copy()
+                    if self.config.gap_load == "hold" and self._load is not None
+                    else np.zeros(len(f.muscle_ids))
+                )
             if self._fatigue_time is not None and state.time > self._fatigue_time:
-                f.compute_act(load, dt=state.time - self._fatigue_time)
-            self._fatigue_time, self._load = state.time, load.copy()
+                dt = state.time - self._fatigue_time
+                f.compute_act(load, dt=dt)
+                if not valid_load:
+                    self._pending_gap += dt
+                    flags |= Flag.AFTER_GAP
+                    self.mark(
+                        "optimization_gap",
+                        from_time=self._fatigue_time,
+                        to_time=state.time,
+                        assumed_load=self.config.gap_load,
+                        solver_status=res.status,
+                        quality_flags=int(flags),
+                    )
+            self._fatigue_time = state.time
+            if valid_load or self._load is None:
+                self._load = load.copy()
             mf = np.zeros(self.model.nu)
             mf[f.muscle_ids] = f.MF
         frame = ShadowFrame(
