@@ -265,6 +265,7 @@ class KeypointIK:
         if qpos is not None:
             self.configuration.update(np.asarray(qpos, dtype=float))
         self.posture.set_target(self.configuration.q)
+        self.posture.set_cost(_FIRST_FRAME_POSTURE)
         self._prev, self._last_time = None, None
 
     def _frame_position(self, kp: Keypoint) -> np.ndarray:

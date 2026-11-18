@@ -60,6 +60,34 @@ def test_moving_body_site_and_geom_residuals_match_world_transforms():
         )
 
 
+def test_reset_removes_the_previous_sampling_interval_posture_weight():
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    points = [ik.Keypoint("elbow", "fore"), ik.Keypoint("hand", "hand", "site")]
+    initial = np.array([0.3, 1.0])
+    fresh = ik.KeypointIK(model, points, qpos0=initial)
+    warmed = ik.KeypointIK(model, points, qpos0=initial)
+    data = mujoco.MjData(model)
+
+    def observations(pose):
+        data.qpos[:] = pose
+        mujoco.mj_kinematics(model, data)
+        return {
+            "elbow": data.body("fore").xpos.copy(),
+            "hand": data.site("hand").xpos.copy(),
+        }
+
+    first = observations(initial)
+    assert warmed.solve(0.0, first).usable
+    assert warmed.solve(1e-5, first).usable
+    warmed.reset(initial)
+    moved = observations([0.5, 1.1])
+    expected = fresh.solve(1.0, moved)
+    after_reset = warmed.solve(1.0, moved)
+    assert after_reset.usable
+    assert np.linalg.norm(expected.qpos - initial) > 0.1
+    np.testing.assert_allclose(after_reset.qpos, expected.qpos, rtol=0.0, atol=1e-12)
+
+
 @pytest.mark.parametrize(
     "initial", [[0.0], [[0.0, 0.5]], [float("nan"), 0.5], [0.0, float("inf")]]
 )
