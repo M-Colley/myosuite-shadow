@@ -1,6 +1,7 @@
 """Free-root support policy and mixed actuator loads at the pipeline boundary."""
 
 import dataclasses
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
@@ -8,7 +9,7 @@ import pytest
 from myosuite.biomechanics.static_optimization import StaticOptimizationResult
 from myosuite.core.muscle_conditions import CumulativeFatigue
 
-from myosuite_shadow import ShadowModel, ShadowModelConfig
+from myosuite_shadow import ShadowModel, ShadowModelConfig, pipeline
 from myosuite_shadow.flags import Flag
 
 
@@ -59,6 +60,18 @@ def first_frame(shadow, model):
         frame = shadow.push(index / 30, model.qpos0)
     assert frame is not None
     return frame
+
+
+def test_free_root_estimate_reports_push_compute_time(mixed_model, monkeypatch):
+    clock = iter([50.0] * 5 + [50.012])
+    with ShadowModel(mixed_model, ShadowModelConfig(window=5, fatigue=False)) as shadow:
+        monkeypatch.setattr(
+            pipeline, "time", SimpleNamespace(perf_counter=lambda: next(clock))
+        )
+        monkeypatch.setattr(
+            shadow.optimizer, "solve", lambda *args, **kwargs: candidate(mixed_model)
+        )
+        assert first_frame(shadow, mixed_model).compute_ms == pytest.approx(12.0)
 
 
 @pytest.mark.parametrize(

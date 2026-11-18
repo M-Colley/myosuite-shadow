@@ -441,14 +441,16 @@ class ShadowModel:
             flags |= Flag.NOT_SOLVED
         support_valid = True
         for j in np.flatnonzero(self.model.jnt_type == mujoco.mjtJoint.mjJNT_FREE):
-            start = int(self.model.jnt_dofadr[j])
+            dof_start = int(self.model.jnt_dofadr[j])
             for offset, limit in (
                 (0, self.config.root_residual_force_limit),
                 (3, self.config.root_residual_moment_limit),
             ):
-                value = np.linalg.norm(res.reserve[start + offset : start + offset + 3])
-                if limit is not None and (not np.isfinite(value) or value > limit):
-                    support_valid = False
+                if limit is not None:
+                    first = dof_start + offset
+                    value = np.linalg.norm(res.reserve[first : first + 3])
+                    if not np.isfinite(value) or value > limit:
+                        support_valid = False
         if not support_valid:
             flags |= Flag.ROOT_RESIDUAL
         valid_load = valid_candidate and support_valid

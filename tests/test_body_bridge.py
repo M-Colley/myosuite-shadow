@@ -105,6 +105,43 @@ def test_clock_fits_only_matched_low_rtt_replies():
     assert len(clock.exchanges) == 4
 
 
+def test_clock_refresh_preserves_kinematic_time_but_updates_freshness():
+    clock = BodyClock("testclock", 1000.0, max_uncertainty_s=0.02)
+    for host in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
+        probe = clock.probe(host)
+        clock.reply(
+            {
+                **probe,
+                "type": "clock_reply",
+                "source_time_s": host + 10.001 + host**2 * 0.0001,
+            },
+            host + 0.002,
+        )
+    initial = clock.session_clock
+    latest = clock.mapping
+    assert initial is not None and latest is not None
+    assert latest.source_anchor_s > initial.source_anchor_s
+    assert latest.rate != initial.rate
+    source_s = initial.valid_until_source_s + 0.1
+    with pytest.raises(ValueError, match="expired"):
+        initial.map(source_s)
+    frame = BodySource("test", "P01", "testclock", "model_world").frame(
+        {**packet(), "time_s": source_s},
+        latest,
+        session_clock=initial,
+        receive_unix=1012.0,
+    )
+    latest_session_time, latest_unix = latest.map(source_s)
+    kin_time = (
+        initial.session_anchor_s + (source_s - initial.source_anchor_s) * initial.rate
+    )
+    assert abs(latest_session_time - kin_time) > 1e-5
+    assert frame.time_s == kin_time
+    assert frame.evaluation_unix == latest_unix
+    assert frame.metadata["clock_mapping"] == latest.record()
+    assert frame.metadata["source_observation_time_s"] == source_s
+
+
 def test_message_rejects_unknown_schema_and_nonfinite():
     for raw in ['{"type":"hello"}', [], {"schema": SCHEMA, "number": float("inf")}]:
         with pytest.raises(ValueError):
@@ -218,6 +255,11 @@ def test_region_masks_reject_inferred_and_bad_results(tmp_path, elbow):
         dataclasses.replace(frame, position_tracked={"wrist": True, "elbow": True})
     )
     assert server.state()["regions"][0]["activation"] == 0.2
+    server._resume_at = 0.1
+    state = server.state()
+    assert state["quality"]["reason"] == "waiting_for_recovery_estimate"
+    assert state["regions"][0]["activation"] is None
+    server._resume_at = 0.0
     estimate.optimization.activation[0] = float("nan")
     assert server.state()["quality"]["status"] == "failed"
     assert server.state()["regions"][0]["activation"] is None

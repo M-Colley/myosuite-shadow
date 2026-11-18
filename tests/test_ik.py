@@ -28,9 +28,36 @@ _PLANAR = """
   <body name="upper"><joint name="shoulder" axis="0 1 0"/>
     <geom type="capsule" fromto="0 0 0 .3 0 0" size=".02"/>
     <body name="fore" pos=".3 0 0"><joint name="elbow" axis="0 1 0" range="0 2.5"/>
-      <geom type="capsule" fromto="0 0 0 .25 0 0" size=".02"/>
+      <geom name="fore_geom" type="capsule" fromto="0 0 0 .25 0 0" size=".02"/>
       <site name="hand" pos=".25 0 0"/></body></body>
 </worldbody></mujoco>"""
+
+
+def test_moving_body_site_and_geom_residuals_match_world_transforms():
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    points = [
+        ik.Keypoint("elbow", "fore"),
+        ik.Keypoint("hand", "hand", "site"),
+        ik.Keypoint("mid_forearm", "fore_geom", "geom"),
+    ]
+    solver = ik.KeypointIK(model, points, qpos0=np.array([0.3, 1.0]))
+    target = ik.KeypointIK(model, points, qpos0=np.array([0.5, 1.1]))
+    observations = {
+        kp.name: target.configuration.get_transform_frame_to_world(
+            kp.frame, kp.frame_type
+        ).translation()
+        for kp in points
+    }
+    result = solver.solve(0.0, observations)
+    assert result.usable
+    assert np.linalg.norm(result.qpos - [0.3, 1.0]) > 0.1
+    for kp in points:
+        world = solver.configuration.get_transform_frame_to_world(
+            kp.frame, kp.frame_type
+        ).translation()
+        assert result.residual[kp.name] == pytest.approx(
+            np.linalg.norm(world - observations[kp.name]), abs=1e-12
+        )
 
 
 @pytest.mark.parametrize(

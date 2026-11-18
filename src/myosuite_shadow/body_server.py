@@ -15,6 +15,7 @@ import numpy as np
 
 from myosuite_shadow.acquisition import TrackedSession
 from myosuite_shadow.body_protocol import SCHEMA, BodyClock, BodySource, message
+from myosuite_shadow.clock import now
 from myosuite_shadow.flags import Flag, describe
 from myosuite_shadow.live import LiveShadowModel
 from myosuite_shadow.log import model_sha256
@@ -93,8 +94,9 @@ class BodyServer:
         self._wire = None
         self._history = deque(maxlen=2048)
         self._origin = time.perf_counter()
-        self._unix_origin = time.time()
+        self._unix_origin = now()
         self._reason = "waiting_for_producer"
+        self._resume_at: float | None = None
         self._dropped = 0
         self._source_metadata = {}
         self._history_flags = Flag.NONE
@@ -110,7 +112,7 @@ class BodyServer:
             self._wire.write(
                 json.dumps(
                     {
-                        "unix": time.time(),
+                        "unix": now(),
                         "direction": direction,
                         "packet": packet,
                     },
@@ -188,7 +190,7 @@ class BodyServer:
         frame = None if live is None else live.latest
         health = {} if self._acquisition is None else self._acquisition.health
         status = "waiting" if frame is None else "running"
-        age = None if frame is None else max(0.0, time.time() - frame.frame_unix)
+        age = None if frame is None else max(0.0, now() - frame.frame_unix)
         flags = [] if frame is None else describe(frame.flags)
         reason = self._reason
         if health.get("status") == "failed":
@@ -197,6 +199,10 @@ class BodyServer:
             status = "waiting"
         elif reason not in (None, "waiting_for_producer", "clock_warmup"):
             status = "rejected"
+        elif self._resume_at is not None and (
+            frame is None or frame.state.time < self._resume_at
+        ):
+            status, reason = "waiting", "waiting_for_recovery_estimate"
         elif frame is not None:
             fatal = Flag(frame.flags) & ~Flag.INFERRED
             if fatal:
@@ -350,6 +356,8 @@ class BodyServer:
                     if accepted:
                         self._history.append(frame)
                         if version == generation[0]:
+                            if self._reason is not None:
+                                self._resume_at = frame.time_s
                             self._reason = None
                     elif version == generation[0]:
                         self._reason = self._acquisition.health["last_rejection"]
@@ -380,7 +388,10 @@ class BodyServer:
 
         async def synchronize():
             while not stopped.is_set():
-                await send(clock.probe(time.perf_counter() - self._origin))
+                async with send_lock:
+                    packet = clock.probe(time.perf_counter() - self._origin)
+                    await websocket.send(json.dumps(packet, allow_nan=False))
+                    self._record("out", packet)
                 await asyncio.sleep(0.25)
 
         try:
@@ -395,21 +406,22 @@ class BodyServer:
                 asyncio.create_task(synchronize()),
             ]
             async for raw in websocket:
+                received = time.perf_counter() - self._origin
                 try:
                     packet = message(raw)
                     self._record("in", packet)
                     if packet.get("type") == "clock_reply":
-                        await clock_queue.put(
-                            (packet, time.perf_counter() - self._origin)
-                        )
+                        await clock_queue.put((packet, received))
                     elif packet.get("type") == "body_frame":
-                        if clock.mapping is None:
+                        mapping = clock.mapping
+                        if mapping is None:
                             self._reason = "clock_warmup"
                             continue
                         frame = self.source.frame(
                             packet,
-                            clock.mapping,
-                            receive_unix=time.time(),
+                            mapping,
+                            session_clock=clock.session_clock,
+                            receive_unix=self._unix_origin + received,
                             source_metadata=self._source_metadata,
                         )
                         if pending[0] is not None:

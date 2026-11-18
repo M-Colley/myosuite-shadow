@@ -226,7 +226,13 @@ class TrackedSession:
             time_admissible = False
             reason = reason or "stale_or_future_timestamp"
         clock = frame.metadata.get("clock_mapping", frame.metadata.get("clock", {}))
-        if not isinstance(clock, dict):
+        axis = frame.metadata.get("kinematic_clock_axis", clock)
+        if (
+            not isinstance(clock, dict)
+            or not isinstance(axis, dict)
+            or "kinematic_clock_axis" in frame.metadata
+            and (not axis.get("clock_id") or axis["clock_id"] != clock.get("clock_id"))
+        ):
             time_admissible = False
             reason = reason or "invalid_clock_mapping"
             clock = {}
@@ -255,12 +261,12 @@ class TrackedSession:
             self._revision = revision
         if self._registration_needed:
             reason = reason or "registration_required"
-        clock_record = json.dumps(clock, sort_keys=True)
-        if reason is None and clock:
+        if reason is None and axis:
+            clock_record = json.dumps(axis, sort_keys=True)
             if self._clock_record is not None and self._clock_record != clock_record:
                 self.ik.reset()
                 self.live.reset_tracking()
-                self.live.mark("clock_mapping", mapping=clock)
+                self.live.mark("clock_mapping", mapping=axis)
             self._clock_record = clock_record
         normalized = frame
         if reason is None:

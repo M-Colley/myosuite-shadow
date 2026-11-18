@@ -96,7 +96,11 @@ carry null physiological values. Tracking status is matched to the raw frame at
 the estimate's delayed timestamp.
 
 Nonce-matched low-RTT clock exchanges span at least one second, bound uncertainty
-and refresh periodically. Freshness uses **client observation time**.
+and refresh periodically. Freshness uses **client observation time** mapped by the
+latest valid clock fit. Kinematics keeps the first fit's source-to-session axis
+for the connection so routine clock refreshes cannot introduce artificial motion
+or interrupt the derivative window. Use `evaluation_unix` to align these
+observations with other recordings; the raw record retains both clock mappings.
 Native pose capture age remains unverified, even if an SDK exposes a predicted
 display time. `--strict-pose-timing` suppresses physiological feedback for these
 sources. Hardware accuracy and complete capture-to-feedback latency need a real,
@@ -127,5 +131,8 @@ Repeat the separate-process A/B/C regression from the shadow environment:
 python examples/live_body_roundtrip.py --headset-python <headset-python-executable> --headset-repo <headset-checkout> --out-dir <new-evidence-directory>
 ```
 
-It retains exact prompts/results, verifies condition fields on outputs and
-prompts, and writes roundtrip.json. It uses the deterministic demo provider.
+It retains exact prompts/results and verifies condition fields on outputs and
+prompts using the deterministic demo provider. `roundtrip.json` reports p95
+model compute time and mapped observation-to-estimate time. Model compute time
+excludes IK and queueing. Observation-to-estimate time includes transport, IK
+and the derivative window; it ends before feedback generation or display.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import secrets
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,7 @@ class BodySource:
         *,
         receive_unix: float,
         source_metadata: dict | None = None,
+        session_clock: ClockMapping | None = None,
     ) -> TrackerFrame:
         value = message(value)
         if value.get("type") != "body_frame":
@@ -92,6 +94,14 @@ class BodySource:
             raise ValueError("every body position requires explicit confidence")
         source_time = finite(value.get("time_s"), "body time_s")
         session_time, mapped_unix = clock.map(source_time)
+        axis = clock
+        if session_clock is not None:
+            if session_clock.clock_id != clock.clock_id:
+                raise ValueError("body session clock identity mismatch")
+            axis = session_clock
+            session_time = (
+                axis.session_anchor_s + (source_time - axis.source_anchor_s) * axis.rate
+            )
         fidelity = value.get("actual_fidelity", "unknown")
         if fidelity not in {"unknown", "low", "high"}:
             raise ValueError("unknown body actual_fidelity")
@@ -116,6 +126,13 @@ class BodySource:
                 **metadata,
                 "source_metadata": source_metadata or {},
                 "clock_mapping": clock.record(),
+                "kinematic_clock_axis": {
+                    "clock_id": axis.clock_id,
+                    "source_anchor_s": axis.source_anchor_s,
+                    "session_anchor_s": axis.session_anchor_s,
+                    "rate": axis.rate,
+                },
+                "source_observation_time_s": source_time,
                 "actual_fidelity": fidelity,
                 "pose_time_semantics": "client_observation_estimate",
                 "capture_age_verified": False,
@@ -143,16 +160,19 @@ class BodyClock:
         self.pending: dict[str, float] = {}
         self.exchanges: list[tuple[float, float, float]] = []
         self.mapping: ClockMapping | None = None
+        self.session_clock: ClockMapping | None = None
         self.error: str | None = None
         self._last_fit = -math.inf
+        self._pending_lock = threading.Lock()
 
     def probe(self, host_s: float) -> dict:
         host_s = finite(host_s, "clock send time")
-        self.pending = {
-            key: sent for key, sent in self.pending.items() if host_s - sent < 2
-        }
         nonce = secrets.token_hex(12)
-        self.pending[nonce] = host_s
+        with self._pending_lock:
+            self.pending = {
+                key: sent for key, sent in self.pending.items() if host_s - sent < 2
+            }
+            self.pending[nonce] = host_s
         return {
             "type": "clock_probe",
             "schema": SCHEMA,
@@ -166,9 +186,12 @@ class BodyClock:
         if value.get("type") != "clock_reply" or value.get("clock_id") != self.clock_id:
             raise ValueError("clock reply identity mismatch")
         nonce = value.get("nonce")
-        if not isinstance(nonce, str) or nonce not in self.pending:
+        if not isinstance(nonce, str):
             raise ValueError("unknown or repeated clock nonce")
-        sent = self.pending.pop(nonce)
+        with self._pending_lock:
+            sent = self.pending.pop(nonce, None)
+        if sent is None:
+            raise ValueError("unknown or repeated clock nonce")
         source_s = finite(value.get("source_time_s"), "clock source time")
         if host_s < sent or host_s - sent >= 0.05:
             self.error = "clock round trip exceeds 50 ms"
@@ -190,4 +213,6 @@ class BodyClock:
         except ValueError as error:
             self.error = str(error)
         else:
+            if self.session_clock is None:
+                self.session_clock = candidate
             self.mapping, self._last_fit, self.error = candidate, host_s, None

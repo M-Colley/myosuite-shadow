@@ -422,6 +422,54 @@ def test_clock_refresh_resets_derivatives_without_changing_spatial_calibration(s
         assert live.events[-1][0] == "clock_mapping"
 
 
+def test_freshness_mapping_refresh_does_not_reset_a_stable_kinematic_axis(setup):
+    _, solver, live, points = setup
+    axis = {
+        "clock_id": "quest",
+        "source_anchor_s": 0.0,
+        "session_anchor_s": 0.0,
+        "rate": 1.0,
+    }
+    valid_clock = {"clock_id": "quest", "source_anchor_s": 0.0, "uncertainty_s": 0.001}
+    with TrackedSession(live, solver) as session:
+        first = _frame(
+            points,
+            metadata={"clock_mapping": valid_clock, "kinematic_clock_axis": axis},
+        )
+        assert session.submit(first)
+        second = dataclasses.replace(
+            first,
+            sequence=2,
+            time_s=1.03,
+            metadata={
+                "clock_mapping": {**valid_clock, "uncertainty_s": 0.1},
+                "kinematic_clock_axis": axis,
+            },
+        )
+        assert not session.submit(second)
+        assert session.health["last_rejection"] == "clock_uncertainty"
+        changed_clock = {**valid_clock, "source_anchor_s": 1.0}
+        assert session.submit(
+            dataclasses.replace(
+                second, metadata={**first.metadata, "clock_mapping": changed_clock}
+            )
+        )
+        assert live.resets == 0
+        new_axis = {**axis, "source_anchor_s": 0.1, "session_anchor_s": 0.09}
+        assert session.submit(
+            dataclasses.replace(
+                second,
+                sequence=3,
+                time_s=1.06,
+                metadata={
+                    "clock_mapping": changed_clock,
+                    "kinematic_clock_axis": new_axis,
+                },
+            )
+        )
+        assert live.resets == 1
+
+
 def test_fidelity_fallback_cannot_enter_a_high_fidelity_protocol(setup):
     _, solver, live, points = setup
     with TrackedSession(

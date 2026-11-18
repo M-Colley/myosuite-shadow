@@ -8,13 +8,35 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
+import math
 from collections import deque
 from pathlib import Path
 
 from myosuite_shadow.body_cli import initialize, synthetic_stream
 from myosuite_shadow.body_server import BodyServer
 from myosuite_shadow.tracking_config import load_tracking_setup
+
+
+def timing_summary(path: Path) -> dict:
+    with path.open(encoding="utf-8", newline="") as stream:
+        estimates = list(csv.DictReader(stream))
+    if not estimates:
+        raise ValueError("no estimates available for timing")
+
+    def p95(samples):
+        values = sorted(samples)
+        return values[math.ceil(0.95 * len(values)) - 1]
+
+    return {
+        "estimates": len(estimates),
+        "compute_p95_ms": p95(float(row["compute_ms"]) for row in estimates),
+        "observation_to_estimate_p95_ms": p95(
+            1000 * (float(row["done_unix"]) - float(row["frame_unix"]))
+            for row in estimates
+        ),
+    }
 
 
 async def run(headset_python: Path, headset_repo: Path, out_dir: Path) -> None:
@@ -112,6 +134,7 @@ async def run(headset_python: Path, headset_repo: Path, out_dir: Path) -> None:
                     "condition": condition,
                     "fresh_states": len(fresh),
                     "feedback_requests": len(requests),
+                    "timing": timing_summary(server.log_dir / "estimates.csv"),
                     "model_sha256": fresh[-1]["model_sha256"],
                     "capture_age_verified": fresh[-1]["quality"][
                         "capture_age_verified"
