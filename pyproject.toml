@@ -26,7 +26,7 @@ dependencies = [
   "mujoco>=3.3,<4",
   # The study-support APIs require this published MyoSuite source revision.
   # Replace the Git pin with a released version once those APIs ship.
-  "myosuite @ git+https://github.com/MyoHub/myosuite.git@a14953a849ccc952dedd7bbd7d4578c8632c771e",
+  "myosuite @ git+https://github.com/MyoHub/myosuite.git@ba3e73f2d38305fcd7093e26bb85f07574451a4c",
 ]
 
 [project.optional-dependencies]

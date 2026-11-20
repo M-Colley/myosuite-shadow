@@ -16,10 +16,10 @@ estimates under a minimum-effort assumption. Start with
 ## Install
 
 Version 0.3 pins the published MyoSuite source commit
-[`a14953a849ccc952dedd7bbd7d4578c8632c771e`](https://github.com/MyoHub/myosuite/commit/a14953a849ccc952dedd7bbd7d4578c8632c771e).
-This supplies the required study-support APIs; it is not an official MyoSuite
-release or evidence of participant accuracy. From this repository, install the
-frozen study environment:
+[`ba3e73f2d38305fcd7093e26bb85f07574451a4c`](https://github.com/MyoHub/myosuite/commit/ba3e73f2d38305fcd7093e26bb85f07574451a4c).
+This supplies the study-support APIs, corrected fatigue censoring and MVC model
+checks. It is not an official MyoSuite release or evidence of participant
+accuracy. From this repository, install the frozen study environment:
 
 ```bash
 uv sync --frozen --extra all --python 3.12

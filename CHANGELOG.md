@@ -3,12 +3,15 @@
 ## 0.3.0 (unreleased)
 
 Pins the published MyoSuite source commit
-[`a14953a849ccc952dedd7bbd7d4578c8632c771e`](https://github.com/MyoHub/myosuite/commit/a14953a849ccc952dedd7bbd7d4578c8632c771e),
+[`ba3e73f2d38305fcd7093e26bb85f07574451a4c`](https://github.com/MyoHub/myosuite/commit/ba3e73f2d38305fcd7093e26bb85f07574451a4c),
 with optional editable development described in [development.md](docs/development.md).
 Reusable model calculations live in `myosuite.biomechanics`; shadow owns
 acquisition and study orchestration. This remains alpha software, not an official
 MyoSuite release or a completed participant validation.
 
+- **MyoSuite calibration fixes.** The source pin includes corrected endurance
+  censoring at `max_time` and rejects stateless muscle control clamps that would
+  make capped MVC torque predictions incorrect.
 - **Participant acquisition.** Canonical metric 3D frames retain source/person
   identity, tracked/inferred states, source revisions and clock evidence. Quest
   body-API decoding, native sender/clock examples and Sapiens2 308-point imports

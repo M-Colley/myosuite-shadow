@@ -14,7 +14,7 @@ on:
       myosuite_ref:
         description: Full commit SHA of the MyoSuite study-support prerequisite
         required: true
-        default: a14953a849ccc952dedd7bbd7d4578c8632c771e
+        default: ba3e73f2d38305fcd7093e26bb85f07574451a4c
         type: string
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MYOSUITE_REPOSITORY: ${{ inputs.myosuite_repository || vars.MYOSUITE_REPOSITORY || 'MyoHub/myosuite' }}
-      MYOSUITE_REF: ${{ inputs.myosuite_ref || vars.MYOSUITE_REF || 'a14953a849ccc952dedd7bbd7d4578c8632c771e' }}
+      MYOSUITE_REF: ${{ inputs.myosuite_ref || vars.MYOSUITE_REF || 'ba3e73f2d38305fcd7093e26bb85f07574451a4c' }}
     defaults:
       run:
         working-directory: shadow
