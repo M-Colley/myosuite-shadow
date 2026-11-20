@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import socket
 import threading
 import time
 from collections.abc import Callable
+from numbers import Integral, Real
 from typing import Any
 
 from myosuite_shadow.clock import now
@@ -17,6 +19,80 @@ from .frames import ClockMapping, fit_clock_mapping
 
 class _Cancelled(Exception):
     pass
+
+
+def validate_clock_sync_options(
+    *,
+    refresh_s: float | None = 20,
+    port: int = 9764,
+    session_epoch: float = 0,
+    count: int = 30,
+    interval_s: float = 0.2,
+    timeout_s: float = 0.5,
+    validity_s: float = 60,
+    max_rtt_s: float = 0.05,
+    max_uncertainty_s: float = 0.01,
+) -> None:
+    """Validate synchronization settings without network or worker side effects.
+
+    ``refresh_s=None`` omits the periodic-refresh gate for one-shot exchanges.
+    This checks scalar bounds, not whether a measured clock fit will succeed.
+    """
+    for name, value, minimum, maximum in (
+        ("count", count, 3, None),
+        ("port", port, 1, 65535),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Integral)
+            or value < minimum
+            or (maximum is not None and value > maximum)
+        ):
+            raise ValueError(f"invalid clock synchronization {name}")
+    values = {
+        "interval_s": interval_s,
+        "timeout_s": timeout_s,
+        "validity_s": validity_s,
+        "max_rtt_s": max_rtt_s,
+        "max_uncertainty_s": max_uncertainty_s,
+        "session_epoch": session_epoch,
+    }
+    if refresh_s is not None:
+        values["refresh_s"] = refresh_s
+    for name, value in values.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(value)
+            or (name != "session_epoch" and value <= 0)
+        ):
+            raise ValueError(
+                f"{name} must be finite and positive (epoch may be any sign)"
+            )
+    if refresh_s is not None and refresh_s >= validity_s:
+        raise ValueError("clock refresh must be positive and shorter than validity")
+
+
+def validate_clock_refresh(previous: ClockMapping, mapping: ClockMapping) -> None:
+    """Require a refreshed mapping to preserve source, session and Unix axes."""
+    if not isinstance(mapping, ClockMapping):
+        raise TypeError("clock synchronization returned no ClockMapping")
+    if mapping.clock_id != previous.clock_id:
+        raise ValueError("source clock identity changed; start a new epoch")
+    source = mapping.source_anchor_s
+    old_session = (
+        previous.session_anchor_s + (source - previous.source_anchor_s) * previous.rate
+    )
+    allowed = previous.uncertainty_s + mapping.uncertainty_s
+    if abs(mapping.session_anchor_s - old_session) > allowed + 1e-6:
+        raise ValueError("clock refresh changed the session time axis")
+    if previous.unix_anchor is not None:
+        if mapping.unix_anchor is None:
+            raise ValueError("clock refresh lost its Unix reference")
+        old_offset = previous.unix_anchor - previous.session_anchor_s
+        new_offset = mapping.unix_anchor - mapping.session_anchor_s
+        if abs(new_offset - old_offset) > allowed + 0.001:
+            raise ValueError("clock refresh changed the Unix reference")
 
 
 def synchronize_quest_clock(
@@ -37,10 +113,17 @@ def synchronize_quest_clock(
     Keep ``session_epoch`` constant for the whole study. The source clock ID
     comes from the replies; nonce/clock mismatch and uncertainty fail explicitly.
     """
-    if count < 3 or min(interval_s, timeout_s) <= 0:
-        raise ValueError(
-            "clock synchronization needs >=3 samples and positive intervals"
-        )
+    validate_clock_sync_options(
+        refresh_s=None,
+        port=port,
+        session_epoch=session_epoch,
+        count=count,
+        interval_s=interval_s,
+        timeout_s=timeout_s,
+        validity_s=validity_s,
+        max_rtt_s=max_rtt_s,
+        max_uncertainty_s=max_uncertainty_s,
+    )
     stopped = stop_event or threading.Event()
     samples = []
     clock_id = None
@@ -98,8 +181,19 @@ class QuestClockSynchronizer:
         max_uncertainty_s: float = 0.01,
         sync_function: Callable[[], ClockMapping] | None = None,
     ) -> None:
-        if not 0 < refresh_s < validity_s or min(interval_s, timeout_s) <= 0:
-            raise ValueError("clock refresh must be positive and shorter than validity")
+        if refresh_s is None:
+            raise ValueError("periodic clock refresh requires refresh_s")
+        validate_clock_sync_options(
+            refresh_s=refresh_s,
+            port=port,
+            session_epoch=session_epoch,
+            count=count,
+            interval_s=interval_s,
+            timeout_s=timeout_s,
+            validity_s=validity_s,
+            max_rtt_s=max_rtt_s,
+            max_uncertainty_s=max_uncertainty_s,
+        )
         self._mapping = initial
         self._stop, self._refresh = threading.Event(), threading.Event()
         self._lock = threading.Lock()
@@ -133,31 +227,8 @@ class QuestClockSynchronizer:
                 return
             try:
                 mapping = self._sync()
-                if not isinstance(mapping, ClockMapping):
-                    raise TypeError("clock synchronization returned no ClockMapping")
                 with self._lock:
-                    if mapping.clock_id != self._mapping.clock_id:
-                        raise ValueError(
-                            "source clock identity changed; start a new epoch"
-                        )
-                    # A refresh is calibrated on the same host session axis.
-                    source = mapping.source_anchor_s
-                    old_session = (
-                        self._mapping.session_anchor_s
-                        + (source - self._mapping.source_anchor_s) * self._mapping.rate
-                    )
-                    allowed = self._mapping.uncertainty_s + mapping.uncertainty_s
-                    if abs(mapping.session_anchor_s - old_session) > allowed + 1e-6:
-                        raise ValueError("clock refresh changed the session time axis")
-                    if self._mapping.unix_anchor is not None:
-                        if mapping.unix_anchor is None:
-                            raise ValueError("clock refresh lost its Unix reference")
-                        old_offset = (
-                            self._mapping.unix_anchor - self._mapping.session_anchor_s
-                        )
-                        new_offset = mapping.unix_anchor - mapping.session_anchor_s
-                        if abs(new_offset - old_offset) > allowed + 0.001:
-                            raise ValueError("clock refresh changed the Unix reference")
+                    validate_clock_refresh(self._mapping, mapping)
                     self._mapping, self._last_refresh = mapping, now()
             except _Cancelled:
                 return
