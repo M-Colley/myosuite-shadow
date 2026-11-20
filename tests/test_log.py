@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
 from pathlib import Path
 
 import mujoco
@@ -39,7 +40,9 @@ def test_log_records_every_frame(elbow: mujoco.MjModel, tmp_path: Path) -> None:
     assert header[: len(ESTIMATE_COLUMNS)] == ESTIMATE_COLUMNS
     assert header[len(ESTIMATE_COLUMNS) :] == [f"a_{n}" for n in names] + [
         f"mf_{n}" for n in names
-    ] + [f"contact_{body}_{x}" for x in "xyz"]
+    ] + [f"contact_{body}_{x}" for x in "xyz"] + [
+        f"reserve_{i}" for i in range(elbow.nv)
+    ] + [f"tau_{i}" for i in range(elbow.nv)]
     assert all(len(r) == len(header) for r in rows)
     record = json.loads((tmp_path / "record.json").read_text(encoding="utf-8"))
     assert record["model_sha256"] == model_sha256(elbow)
@@ -69,6 +72,12 @@ def test_session_reads_back_exactly(elbow: mujoco.MjModel, tmp_path: Path) -> No
     np.testing.assert_array_equal(
         s.contact_force[body],
         [f.optimization.contact_force[elbow.nbody - 1] for f in frames],
+    )
+    np.testing.assert_array_equal(
+        s.columns["reserve_0"], [f.optimization.reserve[0] for f in frames]
+    )
+    np.testing.assert_array_equal(
+        s.columns["tau_0"], [f.optimization.joint_torque[0] for f in frames]
     )
     assert (s.status == "solved").all()
     # Inputs: every pose, including the 4 that only filled the window.
@@ -120,6 +129,23 @@ def test_provenance_records_versions() -> None:
     assert p["not-a-package-xyz"] == {"version": None}
 
 
+def test_untracked_runtime_code_marks_an_editable_checkout_dirty(
+    tmp_path: Path,
+) -> None:
+    from myosuite_shadow.log import _git_state
+
+    source = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "checkout"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--local", str(source), str(checkout)],
+        check=True,
+        capture_output=True,
+    )
+    assert not _git_state(checkout)["dirty"]
+    (checkout / "untracked_runtime.py").write_text("value = 1\n", encoding="utf-8")
+    assert _git_state(checkout)["dirty"]
+
+
 def test_events_and_wall_clock_times(elbow: mujoco.MjModel, tmp_path: Path) -> None:
     with ShadowModel(elbow, ShadowModelConfig(window=5), log_dir=tmp_path) as shadow:
         shadow.mark("session_start", condition="B")
@@ -148,3 +174,57 @@ def test_a_session_directory_is_not_overwritten(
     ShadowModel(elbow, log_dir=tmp_path).close()
     with pytest.raises(FileExistsError, match="resume"):
         ShadowModel(elbow, log_dir=tmp_path)
+
+
+def test_capture_evaluation_and_receive_times_keep_distinct_meanings(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    expected = []
+    with ShadowModel(
+        elbow, ShadowModelConfig(window=5), log_dir=tmp_path / "source"
+    ) as shadow:
+        for k in range(15):
+            capture = 1000 + k / 20 if k % 3 == 0 else None
+            evaluation = 2000 + k / 20 if k % 3 != 2 else None
+            receive = 3000 + k / 20
+            expected.append(
+                capture
+                if capture is not None
+                else evaluation
+                if evaluation is not None
+                else receive
+            )
+            shadow.push(
+                k / 20,
+                [1.2],
+                [-15.0],
+                capture_unix=capture,
+                evaluation_unix=evaluation,
+                receive_unix=receive,
+            )
+    source = read_session(tmp_path / "source")
+    assert source.input_qfrc.shape == (15, elbow.nv)
+    np.testing.assert_array_equal(source.columns["frame_unix"], expected[2:13])
+    assert np.isnan(source.input_columns["capture_unix"][[1, 2, 4]]).all()
+    assert source.input_columns["evaluation_unix"][1] == 2000.05
+    assert source.input_columns["receive_unix"][1] == 3000.05
+    config = ShadowModelConfig.from_dict(source.record["config"])
+    with ShadowModel(elbow, config, log_dir=tmp_path / "replay") as replay:
+        list(source.replay(replay))
+    result = read_session(tmp_path / "replay")
+    np.testing.assert_array_equal(
+        result.columns["frame_unix"], source.columns["frame_unix"]
+    )
+    for name in ("capture_unix", "evaluation_unix", "receive_unix"):
+        np.testing.assert_array_equal(
+            result.input_columns[name], source.input_columns[name]
+        )
+
+
+def test_invalid_evaluation_time_is_rejected_before_logging(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    with ShadowModel(elbow, log_dir=tmp_path) as shadow:
+        with pytest.raises(ValueError, match="timestamps must be finite"):
+            shadow.push(0.0, [1.2], evaluation_unix=np.nan)
+    assert len(read_session(tmp_path).input_time) == 0

@@ -81,9 +81,9 @@ def test_missing_and_unconfident_keypoints() -> None:
     r = solver.solve(0.0, {"hand": hand}, {"hand": 0.9})
     assert not r.usable and Flag.MISSING in r.flags  # one point is not enough
     elbow = data.xpos[model.body("fore").id].copy()
-    r = solver.solve(0.0, {"elbow": elbow, "hand": hand}, {"elbow": 0.2, "hand": 0.9})
+    r = solver.solve(0.03, {"elbow": elbow, "hand": hand}, {"elbow": 0.2, "hand": 0.9})
     assert not r.usable and Flag.LOW_CONFIDENCE in r.flags
-    r = solver.solve(0.0, {"elbow": elbow, "hand": hand})
+    r = solver.solve(0.06, {"elbow": elbow, "hand": hand})
     assert r.usable and r.flags == Flag.NONE
     np.testing.assert_allclose(r.qpos, [0.3, 1.0], atol=1e-4)
 
@@ -100,7 +100,42 @@ def test_unreachable_targets_flag_limits_and_residual() -> None:
         0.0, {"elbow": np.array([0.3, 0, 0]), "hand": np.array([0.5, 0, 0.1])}
     )
     assert Flag.JOINT_LIMIT in r.flags and Flag.IK_RESIDUAL in r.flags
+    assert not r.usable
     assert r.qpos[1] >= 0.0
+
+
+def test_rejected_pose_cannot_poison_the_next_ik_seed() -> None:
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint("elbow", "fore"), ik.Keypoint("hand", "hand", "site")],
+        qpos0=np.array([0.3, 1.0]),
+    )
+    before = solver.configuration.q.copy()
+    bad = solver.solve(
+        0, {"elbow": np.array([3.0, 0, 0]), "hand": np.array([5.0, 0, 0])}
+    )
+    assert not bad.usable
+    np.testing.assert_array_equal(solver.configuration.q, before)
+    data = mujoco.MjData(model)
+    data.qpos[:] = before
+    mujoco.mj_kinematics(model, data)
+    good = {
+        "elbow": data.xpos[model.body("fore").id].copy(),
+        "hand": data.site_xpos[model.site("hand").id].copy(),
+    }
+    assert solver.solve(0.1, good).usable
+    assert not solver.solve(0.2, good, {"elbow": np.nan, "hand": 1.0}).usable
+
+
+def test_required_landmark_cannot_be_replaced_by_other_points() -> None:
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint("elbow", "fore"), ik.Keypoint("hand", "hand", "site")],
+        ik.IKConfig(min_keypoints=1, required_keypoints=("hand",)),
+    )
+    assert not solver.solve(0, {"elbow": np.array([0.3, 0, 0])}).usable
 
 
 def test_a_jump_between_frames_is_a_glitch() -> None:
@@ -124,6 +159,52 @@ def test_a_jump_between_frames_is_a_glitch() -> None:
     assert solver.solve(0.0, frame([0.0, 1.0])).flags == Flag.NONE
     assert solver.solve(1 / 30, frame([0.02, 1.02])).flags == Flag.NONE
     assert Flag.GLITCH in solver.solve(2 / 30, frame([1.5, 2.0])).flags
+
+
+@pytest.mark.parametrize("motion", ["root_translation", "root_rotation", "ball"])
+def test_floating_and_ball_joint_jumps_are_rejected(motion: str) -> None:
+    joint = '<joint type="ball"/>' if motion == "ball" else "<freejoint/>"
+    model = mujoco.MjModel.from_xml_string(
+        f"""<mujoco><worldbody><body>{joint}
+        <geom type="sphere" size=".1"/>
+        <site name="x" pos=".3 0 0"/><site name="y" pos="0 .3 0"/>
+        <site name="z" pos="0 0 .3"/>
+        </body></worldbody></mujoco>"""
+    )
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint(name, name, "site") for name in ("x", "y", "z")],
+    )
+    data = mujoco.MjData(model)
+
+    def points(qpos: np.ndarray) -> dict:
+        data.qpos[:] = qpos
+        mujoco.mj_kinematics(model, data)
+        return {
+            name: data.site_xpos[model.site(name).id].copy() for name in ("x", "y", "z")
+        }
+
+    initial = model.qpos0.copy()
+    assert solver.solve(0, points(initial)).usable
+    jumped = initial.copy()
+    if motion == "root_translation":
+        jumped[0] = 0.1  # 9 m/s: below the scalar limit, above the root limit.
+    else:
+        jumped[-4:] = [np.cos(0.6), 0, 0, np.sin(0.6)]
+    result = solver.solve(1 / 90, points(jumped))
+    assert max(result.residual.values()) < 1e-3
+    assert not result.usable and result.flags & Flag.GLITCH
+    np.testing.assert_allclose(solver.configuration.q, initial)
+    assert solver.solve(2 / 90, points(initial)).usable
+
+
+@pytest.mark.parametrize(
+    "field", ["max_residual", "max_joint_speed", "max_root_linear_speed"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0.0, -1.0])
+def test_invalid_ik_quality_thresholds_fail_before_solving(field, value) -> None:
+    with pytest.raises(ValueError, match=field):
+        ik.IKConfig(**{field: value})
 
 
 def test_noisy_keypoints_stop_early(arm: mujoco.MjModel) -> None:

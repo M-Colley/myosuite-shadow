@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      myosuite_repository:
+        description: Repository containing the published MyoSuite study-support prerequisite
+        required: true
+        default: MyoHub/myosuite
+        type: string
+      myosuite_ref:
+        description: Full commit SHA of the MyoSuite study-support prerequisite
+        required: true
+        default: a14953a849ccc952dedd7bbd7d4578c8632c771e
+        type: string
 
 permissions:
   contents: read
@@ -13,25 +24,56 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    env:
+      MYOSUITE_REPOSITORY: ${{ inputs.myosuite_repository || vars.MYOSUITE_REPOSITORY || 'MyoHub/myosuite' }}
+      MYOSUITE_REF: ${{ inputs.myosuite_ref || vars.MYOSUITE_REF || 'a14953a849ccc952dedd7bbd7d4578c8632c771e' }}
+    defaults:
+      run:
+        working-directory: shadow
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-2025]
         python: ["3.12", "3.15"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: shadow
+          persist-credentials: false
+      - name: Require the published MyoSuite prerequisite
+        shell: bash
+        run: |
+          if [[ ! "$MYOSUITE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Set MYOSUITE_REF to a published full commit SHA containing the study-support APIs, using repository variables or workflow_dispatch. See docs/development.md."
+            exit 1
+          fi
+          if [[ ! "$MYOSUITE_REPOSITORY" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+            echo "::error::MYOSUITE_REPOSITORY must have owner/repository form."
+            exit 1
+          fi
+      - name: Check out the paired MyoSuite source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYOSUITE_REPOSITORY }}
+          ref: ${{ env.MYOSUITE_REF }}
+          path: myosuite-study-support
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.13.6"
       - run: uv python install ${{ matrix.python }}
-      - run: uv venv --python ${{ matrix.python }}
       # h5py (a MyoSuite dependency) has no Python 3.15 wheels yet, so it builds
       # from source against the HDF5 library. osqp, daqp, mink and zstandard also
       # build from source on 3.15, with the runners' compilers.
       - name: HDF5 for h5py (Linux, Python 3.15)
         if: runner.os == 'Linux' && matrix.python == '3.15'
+        timeout-minutes: 5
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libhdf5-dev pkg-config
-          echo "HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial" >> "$GITHUB_ENV"
+          hdf5_dir="$RUNNER_TEMP/hdf5"
+          "$CONDA/bin/conda" create -y -q --override-channels -c conda-forge -p "$hdf5_dir" 'hdf5=1.14=*nompi*'
+          test -f "$hdf5_dir/include/hdf5.h"
+          echo "HDF5_DIR=$hdf5_dir" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$hdf5_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: HDF5 for h5py (Windows, Python 3.15)
         if: runner.os == 'Windows' && matrix.python == '3.15'
         shell: pwsh
@@ -39,14 +81,42 @@ jobs:
           & "$env:CONDA\Scripts\conda.exe" create -y -q -p "$env:RUNNER_TEMP\hdf5" -c conda-forge "hdf5=1.14"
           "HDF5_DIR=$env:RUNNER_TEMP\hdf5\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "$env:RUNNER_TEMP\hdf5\Library\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-      # Pulls MyoSuite from the branch named in pyproject.toml, with every extra.
-      - run: uv pip install -e ".[test]"
+      - name: Install the frozen paired environment
+        run: uv sync --frozen --extra test --python ${{ matrix.python }}
+      - name: Configure source-built HDF5 runtime (Windows, Python 3.15)
+        if: runner.os == 'Windows' && matrix.python == '3.15'
+        run: >-
+          uv run --no-sync python -c
+          "import os, pathlib, sysconfig;
+          dlls = pathlib.Path(os.environ['HDF5_DIR']) / 'bin';
+          assert dlls.is_dir();
+          bootstrap = pathlib.Path(sysconfig.get_path('purelib')) / 'shadow_hdf5_runtime.pth';
+          bootstrap.write_text('import os, sys; sys._shadow_hdf5_directory = os.add_dll_directory(' + repr(str(dlls)) + ')\n', encoding='utf-8')"
       - name: Lockfile matches pyproject.toml
         if: runner.os == 'Linux' && matrix.python == '3.12'
         run: uv lock --check
+      - name: Verify the required model interfaces
+        run: >-
+          uv run --no-sync python -c
+          "import inspect; from myosuite.biomechanics.calibration import max_joint_torque, check_segment_lengths;
+          from myosuite.biomechanics.external_loads import held_mass_qfrc;
+          from myosuite.biomechanics.streaming_kinematics import StreamingKinematics;
+          from myosuite.biomechanics.camera import triangulate_point;
+          from myosuite_shadow.log import package_provenance;
+          import os, pylsl, h5py;
+          assert pylsl.library_version() >= pylsl.MIN_LIBLSL_VERSION;
+          print('Native runtimes:', 'LSL', pylsl.library_version(), 'HDF5', h5py.version.hdf5_version);
+          assert package_provenance(('myosuite',))['myosuite']['commit'] == os.environ['MYOSUITE_REF'];
+          assert 'max_activation' in inspect.signature(max_joint_torque).parameters"
       - run: uv run --no-sync python -m pytest
-      - run: uv run --no-sync python -m ruff check src tests benchmarks
-      - run: uv run --no-sync python -m ruff format --check src tests
+      - name: Verify paired model regressions
+        run: >-
+          uv run --no-sync python -m pytest
+          ../myosuite-study-support/myosuite/tests/test_subject_calibration.py
+          ../myosuite-study-support/myosuite/tests/test_streaming_kinematics.py
+          ../myosuite-study-support/myosuite/tests/test_camera_reconstruction.py
+      - run: uv run --no-sync python -m ruff check src tests benchmarks examples
+      - run: uv run --no-sync python -m ruff format --check src tests examples
       - name: Benchmarks still run
         if: runner.os == 'Linux' && matrix.python == '3.12'
         run: |

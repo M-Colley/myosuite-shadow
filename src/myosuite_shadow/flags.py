@@ -23,6 +23,7 @@ class Flag(IntFlag):
     AFTER_GAP = 32  # first estimate after a tracking gap or restart
     CAPACITY_EXCEEDED = 64  # reserve torque above the limit: muscles fall short
     NOT_SOLVED = 128  # the optimizer did not converge
+    INFERRED = 256  # a required input joint is inferred rather than tracked
 
 
 def describe(flags: int) -> list[str]:

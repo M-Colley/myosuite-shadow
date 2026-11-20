@@ -83,7 +83,10 @@ class IKConfig:
         min_keypoints: Fewer usable keypoints make the frame unusable.
         max_residual: Larger residuals flag ``IK_RESIDUAL`` [m].
         max_joint_speed: Faster hinge/slide motion between frames flags
-            ``GLITCH`` [rad/s or m/s].
+            ``GLITCH`` [rad/s or m/s]. Also bounds the angular speed norm
+            of ball joints and floating roots [rad/s].
+        max_root_linear_speed: Faster floating-root translation flags
+            ``GLITCH`` [m/s], using its velocity norm.
         limit_margin: Joints this close to a range limit flag ``JOINT_LIMIT``.
         couplings: Enforce the model's equality constraints (joint couplings).
     """
@@ -101,6 +104,32 @@ class IKConfig:
     max_joint_speed: float = 30.0
     limit_margin: float = 1e-3
     couplings: bool = True
+    required_keypoints: tuple[str, ...] = ()
+    reject_flags: int = int(Flag.IK_RESIDUAL | Flag.GLITCH)
+    max_root_linear_speed: float = 5.0
+
+    def __post_init__(self) -> None:
+        for name in ("min_keypoints", "max_iterations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in (
+            "position_cost",
+            "max_residual",
+            "max_joint_speed",
+            "max_root_linear_speed",
+            "tolerance",
+            "step_tolerance",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name in ("smoothing", "damping", "limit_margin"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not 0 <= self.min_confidence <= 1:
+            raise ValueError("min_confidence must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -108,10 +137,11 @@ class IKResult:
     """Pose of one frame.
 
     Attributes:
-        qpos: ``(nq,)`` solved pose (the previous pose when not usable).
+        qpos: ``(nq,)`` proposed pose; check ``usable`` before use. Missing
+            landmarks return the previous accepted pose.
         residual: Distance of each used keypoint from its model frame [m].
         flags: Quality flags of this frame.
-        usable: Enough keypoints were available to solve.
+        usable: Required landmarks were present and acceptance thresholds passed.
         iterations: IK steps taken.
     """
 
@@ -142,6 +172,11 @@ class KeypointIK:
         """
         self.model, self.keypoints = model, tuple(keypoints)
         self.config = cfg = config or IKConfig()
+        names = [kp.name for kp in self.keypoints]
+        if len(names) != len(set(names)):
+            raise ValueError("keypoint names must be unique")
+        if set(cfg.required_keypoints) - set(names):
+            raise ValueError("required_keypoints must be included in the mapping")
         if qpos0 is None:
             qpos0 = model.key_qpos[0] if model.nkey else model.qpos0
         self._couplings = JointCouplings.from_model(model)
@@ -172,7 +207,23 @@ class KeypointIK:
         self._limit_adr = model.jnt_qposadr[limited]
         self._limit_range = model.jnt_range[limited]
         self._scalar_dofs = model.jnt_dofadr[scalar]
+        self._root_dofs = model.jnt_dofadr[model.jnt_type == mujoco.mjtJoint.mjJNT_FREE]
+        free_type = int(mujoco.mjtJoint.mjJNT_FREE)
+        ball_type = int(mujoco.mjtJoint.mjJNT_BALL)
+        self._rotation_dofs = [
+            int(adr) + (3 if int(kind) == free_type else 0)
+            for kind, adr in zip(model.jnt_type, model.jnt_dofadr)
+            if int(kind) in (free_type, ball_type)
+        ]
         self._prev: tuple[float, np.ndarray] | None = None
+        self._last_time: float | None = None
+
+    def reset(self, qpos: np.ndarray | None = None) -> None:
+        """Clear temporal priors after loss or a reference-space change."""
+        if qpos is not None:
+            self.configuration.update(np.asarray(qpos, dtype=float))
+        self.posture.set_target(self.configuration.q)
+        self._prev, self._last_time = None, None
 
     def _frame_position(self, kp: Keypoint) -> np.ndarray:
         pose = self.configuration.get_transform_frame_to_world(kp.frame, kp.frame_type)
@@ -229,22 +280,28 @@ class KeypointIK:
             The pose, residuals and flags.
         """
         cfg = self.config
+        if not np.isfinite(time_s) or (
+            self._last_time is not None and time_s <= self._last_time
+        ):
+            raise ValueError("tracker times must be finite and strictly increasing")
+        self._last_time = float(time_s)
+        previous = self.configuration.q.copy()
         flags = Flag.NONE
         used, targets = [], {}
         for kp in self.keypoints:
             p = positions.get(kp.name)
             c = 1.0 if confidence is None else float(confidence.get(kp.name, 0.0))
             task = self.tasks[kp.name]
-            if p is None or not np.all(np.isfinite(p)):
+            if p is None or np.shape(p) != (3,) or not np.all(np.isfinite(p)):
                 flags |= Flag.MISSING
-            elif c < cfg.min_confidence:
+            elif not np.isfinite(c) or not 0 <= c <= 1 or c < cfg.min_confidence:
                 flags |= Flag.LOW_CONFIDENCE
             else:
                 targets[kp.name] = np.asarray(p, dtype=float)
                 task.set_position_cost(cfg.position_cost * c)
                 task.set_target(mink.SE3.from_translation(targets[kp.name]))
                 used.append(kp)
-        if len(used) < cfg.min_keypoints:
+        if len(used) < cfg.min_keypoints or set(cfg.required_keypoints) - set(targets):
             return IKResult(self.configuration.q.copy(), {}, flags, False, 0)
 
         if self._prev is not None and time_s > self._prev[0]:
@@ -261,7 +318,6 @@ class KeypointIK:
         q = self.configuration.q.copy()
         project_joint_couplings(self._couplings, q)
         self.configuration.update(q)
-        self.posture.set_target(q)
         residual = self._residuals(used, targets)
 
         if max(residual.values()) > cfg.max_residual:
@@ -275,7 +331,22 @@ class KeypointIK:
             mujoco.mj_differentiatePos(
                 self.model, dq, time_s - self._prev[0], self._prev[1], q
             )
-            if np.abs(dq[self._scalar_dofs]).max(initial=0.0) > cfg.max_joint_speed:
+            if (
+                np.abs(dq[self._scalar_dofs]).max(initial=0.0) > cfg.max_joint_speed
+                or any(
+                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_joint_speed
+                    for adr in self._rotation_dofs
+                )
+                or any(
+                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_root_linear_speed
+                    for adr in self._root_dofs
+                )
+            ):
                 flags |= Flag.GLITCH
-        self._prev = (float(time_s), q.copy())
-        return IKResult(q, residual, flags, True, iterations)
+        usable = not bool(int(flags) & cfg.reject_flags)
+        if usable:
+            self.posture.set_target(q)
+            self._prev = (float(time_s), q.copy())
+        else:
+            self.configuration.update(previous)
+        return IKResult(q, residual, flags, usable, iterations)

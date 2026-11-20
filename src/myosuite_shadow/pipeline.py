@@ -38,17 +38,26 @@ from typing import Any, Literal, Protocol
 
 import mujoco
 import numpy as np
-from myosuite.core.muscle_conditions import CumulativeFatigue
-from myosuite.physics.static_optimization import (
+from myosuite.biomechanics.static_optimization import (
     StaticOptimizationConfig,
     StaticOptimizationResult,
     StaticOptimizer,
 )
-from myosuite.physics.streaming_kinematics import KinematicState, StreamingKinematics
+from myosuite.biomechanics.streaming_kinematics import (
+    KinematicState,
+    StreamingKinematics,
+)
+from myosuite.core.muscle_conditions import CumulativeFatigue
 
 from myosuite_shadow.clock import now
 from myosuite_shadow.flags import Flag
-from myosuite_shadow.log import MODEL, RECORD, SessionWriter, model_sha256
+from myosuite_shadow.log import (
+    MODEL,
+    RECORD,
+    SessionWriter,
+    model_sha256,
+    replay_operations,
+)
 
 FatigueParams = tuple[tuple[str, float, float, float], ...]
 
@@ -119,6 +128,11 @@ class ShadowModelConfig:
         values["optimization"] = StaticOptimizationConfig(
             **values.get("optimization", {})
         )
+        reserve = values["optimization"].reserve_optimal_force
+        if isinstance(reserve, list):
+            values["optimization"] = dataclasses.replace(
+                values["optimization"], reserve_optimal_force=tuple(reserve)
+            )
         values["log_contact_bodies"] = tuple(values.get("log_contact_bodies", ()))
         values["fatigue_params"] = tuple(
             (str(n), float(F), float(R), float(r))
@@ -142,7 +156,8 @@ class ShadowFrame:
         gap: Untracked time integrated into fatigue before this estimate [s].
         skipped: Kinematic estimates since the previous one that were not
             optimized (``estimate_every`` or a real-time backlog).
-        frame_unix: Capture (else receive) wall-clock time of the estimated frame.
+        frame_unix: Capture, else evaluation, else receive wall-clock time of
+            the estimated frame. Evaluation time can describe a predicted state.
     """
 
     state: KinematicState
@@ -235,6 +250,9 @@ class ShadowModel:
             model, window=cfg.window, lag=cfg.lag, polyorder=cfg.polyorder
         )
         self.optimizer = StaticOptimizer(model, cfg.optimization)
+        self.config = dataclasses.replace(config, optimization=self.optimizer.config)
+        self._closed = False
+        self._initial_fatigue_logged = False
         muscles = model.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE
         self.fatigue = (
             CumulativeFatigue(model) if cfg.fatigue and muscles.any() else None
@@ -259,12 +277,16 @@ class ShadowModel:
     # ------------------------------------------------------------------
     # Streaming
     # ------------------------------------------------------------------
-    def reset_tracking(self) -> None:
+    def reset_tracking(self, *, _record: bool = True) -> None:
         """Restart the kinematic fit (e.g. on a tracker's loss signal).
 
         Fatigue keeps integrating: the next estimate's load covers the time
         since the previous estimate, unless the pause exceeds ``max_gap``.
         """
+        if self._closed:
+            raise RuntimeError("the shadow model is closed")
+        if _record and self.log is not None:
+            self.log.write_operation("reset")
         self.kinematics.reset()
         self._window.clear()
         self._since = self.config.estimate_every - 1
@@ -292,6 +314,7 @@ class ShadowModel:
         *,
         flags: int = Flag.NONE,
         capture_unix: float | None = None,
+        evaluation_unix: float | None = None,
         receive_unix: float | None = None,
         estimate: bool = True,
     ) -> ShadowFrame | None:
@@ -304,6 +327,8 @@ class ShadowModel:
                 (e.g. a hand-held weight mapped with ``mj_applyFT``).
             flags: Tracker or IK quality flags of this pose.
             capture_unix: Wall-clock time the tracker captured the pose, if known.
+            evaluation_unix: Mapped time the tracked/predicted state describes;
+                used for alignment when no measured capture time is available.
             receive_unix: Wall-clock time it arrived (default now).
             estimate: ``False`` updates kinematics, fatigue time and the log
                 only (a real-time runner behind schedule).
@@ -313,21 +338,61 @@ class ShadowModel:
             the optimization is skipped.
         """
         start = time.perf_counter()
+        if self._closed:
+            raise RuntimeError("the shadow model is closed")
+        raw = np.array(qpos, dtype=np.float64)
+        ext = None if external_qfrc is None else np.array(external_qfrc, dtype=float)
+        if raw.shape != (self.model.nq,) or not np.isfinite(raw).all():
+            raise ValueError(f"qpos must be finite with shape ({self.model.nq},)")
+        if not np.isfinite(time_s):
+            raise ValueError("time must be finite")
+        if self._last_pose is not None and not time_s > self._last_pose:
+            raise ValueError("time must increase")
+        if ext is not None and (
+            ext.shape != (self.model.nv,) or not np.isfinite(ext).all()
+        ):
+            raise ValueError(
+                f"external_qfrc must be finite with shape ({self.model.nv},)"
+            )
         receive = now() if receive_unix is None else float(receive_unix)
+        if not np.isfinite(receive) or any(
+            stamp is not None and not np.isfinite(stamp)
+            for stamp in (capture_unix, evaluation_unix)
+        ):
+            raise ValueError(
+                "capture, evaluation and receive timestamps must be finite"
+            )
+        if self.log is not None:
+            if not self._initial_fatigue_logged:
+                if self.fatigue is not None:
+                    self.log.write_operation(
+                        "initial_fatigue", state=self.fatigue.state_dict()
+                    )
+                self._initial_fatigue_logged = True
+            self.log.write_input(
+                time_s,
+                receive,
+                capture_unix,
+                flags,
+                raw,
+                ext,
+                estimate=estimate,
+                evaluation_unix=evaluation_unix,
+            )
         if (
             self._last_pose is not None
             and time_s - self._last_pose > self.config.max_gap
         ):
             self._bridge_gap(self._last_pose, float(time_s))
-            self.reset_tracking()
+            self.reset_tracking(_record=False)
         state = self.kinematics.push(time_s, qpos)  # validates the pose
-        raw = np.array(qpos, dtype=np.float64)
-        ext = None if external_qfrc is None else np.array(external_qfrc, dtype=float)
         self._last_pose = float(time_s)
-        unix = receive if capture_unix is None else float(capture_unix)
+        unix = next(
+            float(stamp)
+            for stamp in (capture_unix, evaluation_unix, receive)
+            if stamp is not None
+        )
         self._window.append(_Pose(float(time_s), raw, ext, Flag(flags), unix))
-        if self.log is not None:
-            self.log.write_input(time_s, receive, capture_unix, flags, raw, ext)
         frame = None
         if state is not None:
             self._since += 1
@@ -411,6 +476,7 @@ class ShadowModel:
         f = self.fatigue
         return {
             "last_pose": self._last_pose,
+            "initial_fatigue_logged": self._initial_fatigue_logged,
             "fatigue": None if f is None else f.state_dict(),
             "fatigue_time": self._fatigue_time,
             "load": None if self._load is None else self._load.tolist(),
@@ -450,6 +516,9 @@ class ShadowModel:
         self._since, self._skipped = state["since"], state["skipped"]
         self._restarted = state["restarted"]
         self._last_pose = state["last_pose"]
+        self._initial_fatigue_logged = state.get(
+            "initial_fatigue_logged", self._last_pose is not None
+        )
         for t, q, ext, flags, unix in state["window"]:
             self.kinematics.push(t, np.array(q))
             external = None if ext is None else np.array(ext)
@@ -490,26 +559,33 @@ class ShadowModel:
             raise ValueError("model differs from the session's (model_sha256)")
         self = cls.__new__(cls)
         self._setup(model, ShadowModelConfig.from_dict(record["config"]), sinks)
-        self.log, checkpoint, pending = SessionWriter.reopen(log_dir, model.nv)
+        self.log, checkpoint, pending, operations = SessionWriter.reopen(
+            log_dir,
+            model.nv,
+            fatigue_count=None
+            if self.fatigue is None
+            else len(self.fatigue.muscle_ids),
+        )
         self._restore(checkpoint["state"])
         nq, nv = model.nq, model.nv
+        inputs = []
         for row in pending:
             values = [float(v) if v != "" else None for v in row]
             qpos = np.array(values[4 : 4 + nq])
             ext = np.array(values[4 + nq : 4 + nq + nv])
-            self.push(
-                values[0],
-                qpos,
-                ext,
-                flags=int(values[3]),
-                capture_unix=values[2],
-                receive_unix=values[1],
+            evaluation = values[4 + nq + nv] if len(values) > 4 + nq + nv else None
+            inputs.append(
+                (values[0], qpos, ext, int(values[3]), values[2], values[1], evaluation)
             )
+        list(replay_operations(self, inputs, operations))
         self.mark("resumed", replayed_inputs=len(pending))
         return self
 
     def close(self) -> None:
         """Write a final checkpoint, close the session log and the sinks."""
+        if self._closed:
+            return
+        self._closed = True
         if self.log is not None:
             self.log.close(self._state())
             self.log = None

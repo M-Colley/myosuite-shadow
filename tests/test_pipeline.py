@@ -7,12 +7,12 @@ import dataclasses
 import mujoco
 import numpy as np
 import pytest
-from myosuite.core.muscle_conditions import CumulativeFatigue
-from myosuite.physics.static_optimization import (
+from myosuite.biomechanics.static_optimization import (
     StaticOptimizationConfig,
     StaticOptimizer,
 )
-from myosuite.physics.streaming_kinematics import StreamingKinematics
+from myosuite.biomechanics.streaming_kinematics import StreamingKinematics
+from myosuite.core.muscle_conditions import CumulativeFatigue
 
 from myosuite_shadow import ShadowModel, ShadowModelConfig
 from myosuite_shadow.flags import Flag
