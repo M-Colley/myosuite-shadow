@@ -49,6 +49,8 @@ MyoSuite release or a completed participant validation.
   Resume preserves a durable recovery journal until replay and its checkpoint
   commit. Interrupted recovery can be retried without losing pending poses;
   configuration preflight reads original metadata without changing the logs.
+  Sessions from models without actuators retain empty activation arrays through
+  reading, replay, reporting and sensitivity analysis.
 - **Worker lifecycle.** Timed close leaves resources open while the worker is
   active; completed close is idempotent. Health reports age, stale/error status,
   queue and drops. Queued resets preserve order. `drain()` waits explicitly for
