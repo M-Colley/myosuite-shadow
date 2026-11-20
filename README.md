@@ -254,6 +254,11 @@ cap, muscles exceed their remaining capacity by up to 0.19 (0.64 at 40 N m).
 
 ### Full body
 
+The versioned live body bridge connects Quest Unity/WebXR observations to
+shadow and returns anatomical regions to the headset's A/B/C feedback gateway.
+See [live body setup and synthetic round trip](docs/live_body.md) for model
+profiles, measured registration, timing limits, quality gates and replay logs.
+
 On a retargeted KIT walk (MyoFullBody at 100 Hz, with ground reactions; the
 clip is not included here) an update takes 15 ms (median), with a p99 of 56 ms.
 With `LiveShadowModel` the kinematics see every pose and the optimization

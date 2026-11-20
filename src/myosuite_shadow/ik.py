@@ -207,6 +207,14 @@ class KeypointIK:
             raise ValueError(f"qpos0 must be finite with shape ({model.nq},)")
         project_joint_couplings(self._couplings, q0)
         self.configuration = mink.Configuration(model, q0)
+        data = self.configuration.data
+        positions = {"body": data.xpos, "site": data.site_xpos, "geom": data.geom_xpos}
+        self._frame_origins = {}
+        for kp in self.keypoints:
+            if kp.frame_type not in positions:
+                raise ValueError(f"unsupported keypoint frame type: {kp.frame_type}")
+            frame = getattr(model, kp.frame_type)(kp.frame)
+            self._frame_origins[kp.name] = positions[kp.frame_type][frame.id]
         self.tasks = {
             kp.name: mink.FrameTask(
                 kp.frame,
@@ -257,11 +265,11 @@ class KeypointIK:
         if qpos is not None:
             self.configuration.update(np.asarray(qpos, dtype=float))
         self.posture.set_target(self.configuration.q)
+        self.posture.set_cost(_FIRST_FRAME_POSTURE)
         self._prev, self._last_time = None, None
 
     def _frame_position(self, kp: Keypoint) -> np.ndarray:
-        pose = self.configuration.get_transform_frame_to_world(kp.frame, kp.frame_type)
-        return pose.translation()
+        return self._frame_origins[kp.name]
 
     def _residuals(self, used: list[Keypoint], targets: dict[str, np.ndarray]) -> dict:
         return {

@@ -28,9 +28,64 @@ _PLANAR = """
   <body name="upper"><joint name="shoulder" axis="0 1 0"/>
     <geom type="capsule" fromto="0 0 0 .3 0 0" size=".02"/>
     <body name="fore" pos=".3 0 0"><joint name="elbow" axis="0 1 0" range="0 2.5"/>
-      <geom type="capsule" fromto="0 0 0 .25 0 0" size=".02"/>
+      <geom name="fore_geom" type="capsule" fromto="0 0 0 .25 0 0" size=".02"/>
       <site name="hand" pos=".25 0 0"/></body></body>
 </worldbody></mujoco>"""
+
+
+def test_moving_body_site_and_geom_residuals_match_world_transforms():
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    points = [
+        ik.Keypoint("elbow", "fore"),
+        ik.Keypoint("hand", "hand", "site"),
+        ik.Keypoint("mid_forearm", "fore_geom", "geom"),
+    ]
+    solver = ik.KeypointIK(model, points, qpos0=np.array([0.3, 1.0]))
+    target = ik.KeypointIK(model, points, qpos0=np.array([0.5, 1.1]))
+    observations = {
+        kp.name: target.configuration.get_transform_frame_to_world(
+            kp.frame, kp.frame_type
+        ).translation()
+        for kp in points
+    }
+    result = solver.solve(0.0, observations)
+    assert result.usable
+    assert np.linalg.norm(result.qpos - [0.3, 1.0]) > 0.1
+    for kp in points:
+        world = solver.configuration.get_transform_frame_to_world(
+            kp.frame, kp.frame_type
+        ).translation()
+        assert result.residual[kp.name] == pytest.approx(
+            np.linalg.norm(world - observations[kp.name]), abs=1e-12
+        )
+
+
+def test_reset_removes_the_previous_sampling_interval_posture_weight():
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    points = [ik.Keypoint("elbow", "fore"), ik.Keypoint("hand", "hand", "site")]
+    initial = np.array([0.3, 1.0])
+    fresh = ik.KeypointIK(model, points, qpos0=initial)
+    warmed = ik.KeypointIK(model, points, qpos0=initial)
+    data = mujoco.MjData(model)
+
+    def observations(pose):
+        data.qpos[:] = pose
+        mujoco.mj_kinematics(model, data)
+        return {
+            "elbow": data.body("fore").xpos.copy(),
+            "hand": data.site("hand").xpos.copy(),
+        }
+
+    first = observations(initial)
+    assert warmed.solve(0.0, first).usable
+    assert warmed.solve(1e-5, first).usable
+    warmed.reset(initial)
+    moved = observations([0.5, 1.1])
+    expected = fresh.solve(1.0, moved)
+    after_reset = warmed.solve(1.0, moved)
+    assert after_reset.usable
+    assert np.linalg.norm(expected.qpos - initial) > 0.1
+    np.testing.assert_allclose(after_reset.qpos, expected.qpos, rtol=0.0, atol=1e-12)
 
 
 @pytest.mark.parametrize(
