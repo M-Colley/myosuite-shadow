@@ -171,6 +171,8 @@ def sample_at(
     if not len(t_src):
         shape = (len(t_dst),) if flat else (len(t_dst), v.shape[1])
         return np.full(shape, np.nan)
+    if v.shape[1] == 0:
+        return np.empty((len(t_dst), 0))
     out = np.column_stack(
         [
             np.interp(t_dst, t_src, v[:, j], left=np.nan, right=np.nan)

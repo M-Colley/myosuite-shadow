@@ -142,12 +142,12 @@ def run_sensitivity(
             frames = list(session.replay(shadow))
         t_v = np.array([f.state.time for f in frames])
         a_v = np.array([f.optimization.activation for f in frames]).reshape(
-            -1, model.nu
+            len(frames), model.nu
         )
         m_v = (
             None
             if shadow.fatigue is None
-            else np.array([f.fatigue for f in frames]).reshape(-1, model.nu)
+            else np.array([f.fatigue for f in frames]).reshape(len(frames), model.nu)
         )
         if times is None:
             times = t_v
