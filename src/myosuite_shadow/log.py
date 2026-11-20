@@ -69,6 +69,10 @@ _PACKAGES = (
     "mujoco",
     "osqp",
     "numpy",
+    "scipy",
+    "pyxdf",
+    "pingouin",
+    "h5py",
     "mink",
     "pylsl",
 )

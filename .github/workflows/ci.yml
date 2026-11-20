@@ -110,6 +110,8 @@ jobs:
           assert package_provenance(('myosuite',))['myosuite']['commit'] == os.environ['MYOSUITE_REF'];
           assert 'max_activation' in inspect.signature(max_joint_torque).parameters"
       - run: uv run --no-sync python -m pytest
+      - name: Installed study command is available
+        run: uv run --no-sync myosuite-shadow-studies --help
       - name: Verify paired model regressions
         run: >-
           uv run --no-sync python -m pytest

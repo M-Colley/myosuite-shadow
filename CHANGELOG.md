@@ -2,6 +2,12 @@
 
 ## 0.3.0 (unreleased)
 
+- **Reusable studies.** Frozen study definitions and durable trial journals bind
+  acquisition to explicit participant/run identities. Trial analysis preserves
+  missing coverage, pauses and quality exclusions. A local immutable result catalog
+  compares compatible outcomes at participant level; declared lineage/split checks
+  guard future learning against reused inputs and participant leakage.
+
 - **External recording regression.** Freezes hashes and compiled model identity,
   checks annotated raw quality and restarts, and compares accepted poses plus
   baseline-scheduled estimates. Explicit baseline input loads are retained as

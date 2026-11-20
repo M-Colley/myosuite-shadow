@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "study_id": "elbow_hold_example",
+  "protocol_version": "1",
+  "conditions": {
+    "unloaded": {"held_mass": {"value": 0, "unit": "kg"}},
+    "loaded": {"held_mass": {"value": 1, "unit": "kg"}}
+  },
+  "trials": [
+    {"trial_id": "unloaded_1", "condition": "unloaded"},
+    {"trial_id": "loaded_1", "condition": "loaded"}
+  ],
+  "quality": {
+    "max_gap_s": 0.1,
+    "min_coverage": 0.9,
+    "max_rejected_fraction": 0.1,
+    "reject_flags": 511,
+    "require_tracking": true
+  },
+  "requirements": {"required_calibrations": ["strength"]},
+  "outcomes": [
+    {
+      "name": "required_elbow_torque",
+      "selector": "tau_0",
+      "semantic_id": "right.elbow.flexion.required_generalized_torque",
+      "unit": "Nm",
+      "coordinate_frame": "model_joint",
+      "normalization": "none",
+      "method_version": "example_review_before_use_v1",
+      "statistic": "time_mean"
+    }
+  ]
+}
