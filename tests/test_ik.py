@@ -33,6 +33,100 @@ _PLANAR = """
 </worldbody></mujoco>"""
 
 
+@pytest.mark.parametrize(
+    "initial", [[0.0], [[0.0, 0.5]], [float("nan"), 0.5], [0.0, float("inf")]]
+)
+def test_initial_pose_requires_finite_vector(initial):
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    with pytest.raises(ValueError, match="qpos0"):
+        ik.KeypointIK(model, [ik.Keypoint("hand", "hand", "site")], qpos0=initial)
+
+
+@pytest.mark.parametrize("scope,expected", [(None, True), ((0,), False), ((1,), True)])
+def test_quality_scope_ignores_only_unselected_limits(scope, expected):
+    model = mujoco.MjModel.from_xml_string(
+        """<mujoco><compiler angle="radian"/><worldbody>
+        <body><joint name="arm" range="-1 1"/><geom size=".1"/>
+        <site name="a" pos=".3 0 0"/><site name="b" pos="0 .2 0"/>
+        <body><joint name="finger" range="0 1"/><geom size=".02"/></body>
+        </body></worldbody></mujoco>"""
+    )
+    q = np.array([0.3, 0.0])
+    data = mujoco.MjData(model)
+    data.qpos[:] = q
+    mujoco.mj_kinematics(model, data)
+    points = {n: data.site_xpos[model.site(n).id].copy() for n in ("a", "b")}
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint(n, n, "site") for n in points],
+        ik.IKConfig(quality_dofs=scope),
+        qpos0=q,
+    )
+    result = solver.solve(0.0, points)
+    assert bool(result.flags & Flag.JOINT_LIMIT) == expected
+    assert result.usable and model.nv == 2
+
+
+@pytest.mark.parametrize("scope", [(-1,), (True,), (0, 0), (0.5,), "0"])
+def test_invalid_quality_scope_is_rejected(scope):
+    with pytest.raises(ValueError, match="quality_dofs"):
+        ik.IKConfig(quality_dofs=scope)
+
+
+def test_quality_scope_model_bounds_and_json_list():
+    assert ik.IKConfig(quality_dofs=[0, 1]).quality_dofs == (0, 1)
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    with pytest.raises(ValueError, match="quality_dofs"):
+        ik.KeypointIK(
+            model,
+            [ik.Keypoint("hand", "hand", "site")],
+            ik.IKConfig(quality_dofs=(model.nv,)),
+        )
+
+
+@pytest.mark.parametrize(
+    "motion,scope,expected",
+    [
+        ("translation", (0,), True),
+        ("translation", (1,), False),
+        ("root_rotation", (5,), True),
+        ("root_rotation", (3,), False),
+        ("ball", (2,), True),
+        ("ball", (0,), False),
+    ],
+)
+def test_quality_scope_checks_selected_free_and_ball_axes(motion, scope, expected):
+    joint = '<joint type="ball"/>' if motion == "ball" else "<freejoint/>"
+    model = mujoco.MjModel.from_xml_string(
+        f"""<mujoco><worldbody><body>{joint}<geom size=".1"/>
+        <site name="x" pos=".3 0 0"/><site name="y" pos="0 .3 0"/>
+        <site name="z" pos="0 0 .3"/></body></worldbody></mujoco>"""
+    )
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint(n, n, "site") for n in ("x", "y", "z")],
+        ik.IKConfig(quality_dofs=scope),
+    )
+    data = mujoco.MjData(model)
+
+    def points(q):
+        data.qpos[:] = q
+        mujoco.mj_kinematics(model, data)
+        return {n: data.site_xpos[model.site(n).id].copy() for n in ("x", "y", "z")}
+
+    initial = model.qpos0.copy()
+    assert solver.solve(0.0, points(initial)).usable
+    jumped = initial.copy()
+    if motion == "translation":
+        jumped[0] = 0.1
+    else:
+        jumped[-4:] = [np.cos(0.6), 0, 0, np.sin(0.6)]
+    result = solver.solve(1 / 90, points(jumped))
+    assert max(result.residual.values()) < 1e-3
+    assert bool(result.flags & Flag.GLITCH) == expected
+    assert result.usable == (not expected)
+
+
 def _points(model: mujoco.MjModel, qpos: np.ndarray, names: list[str]) -> list[dict]:
     data, out = mujoco.MjData(model), []
     for q in np.atleast_2d(qpos):

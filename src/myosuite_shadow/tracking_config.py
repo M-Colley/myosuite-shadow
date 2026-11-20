@@ -54,7 +54,10 @@ def load_tracking_setup(
     if "required_keypoints" in ik_values:
         ik_values["required_keypoints"] = tuple(ik_values["required_keypoints"])
     ik = KeypointIK(
-        model, [Keypoint(**p) for p in settings["keypoints"]], IKConfig(**ik_values)
+        model,
+        [Keypoint(**p) for p in settings["keypoints"]],
+        IKConfig(**ik_values),
+        qpos0=settings.get("initial_qpos"),
     )
     registration = (
         Registration(**settings["registration"]) if "registration" in settings else None

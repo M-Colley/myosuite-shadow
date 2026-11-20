@@ -107,8 +107,24 @@ class IKConfig:
     required_keypoints: tuple[str, ...] = ()
     reject_flags: int = int(Flag.IK_RESIDUAL | Flag.GLITCH)
     max_root_linear_speed: float = 5.0
+    # Gate quality only on this tangent scope; omitted DOFs remain free.
+    quality_dofs: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.quality_dofs is not None:
+            scope = self.quality_dofs
+            if (
+                not isinstance(scope, tuple | list)
+                or any(
+                    isinstance(i, bool | np.bool_)
+                    or not isinstance(i, int | np.integer)
+                    or i < 0
+                    for i in scope
+                )
+                or len(set(scope)) != len(scope)
+            ):
+                raise ValueError("quality_dofs needs distinct nonnegative indices")
+            object.__setattr__(self, "quality_dofs", tuple(int(i) for i in scope))
         for name in ("min_keypoints", "max_iterations"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -172,6 +188,12 @@ class KeypointIK:
         """
         self.model, self.keypoints = model, tuple(keypoints)
         self.config = cfg = config or IKConfig()
+        quality = np.ones(model.nv, dtype=bool)
+        if cfg.quality_dofs is not None:
+            if any(i >= model.nv for i in cfg.quality_dofs):
+                raise ValueError("quality_dofs indices must be below model.nv")
+            quality[:] = False
+            quality[list(cfg.quality_dofs)] = True
         names = [kp.name for kp in self.keypoints]
         if len(names) != len(set(names)):
             raise ValueError("keypoint names must be unique")
@@ -181,6 +203,8 @@ class KeypointIK:
             qpos0 = model.key_qpos[0] if model.nkey else model.qpos0
         self._couplings = JointCouplings.from_model(model)
         q0 = np.array(qpos0, dtype=float)
+        if q0.shape != (model.nq,) or not np.isfinite(q0).all():
+            raise ValueError(f"qpos0 must be finite with shape ({model.nq},)")
         project_joint_couplings(self._couplings, q0)
         self.configuration = mink.Configuration(model, q0)
         self.tasks = {
@@ -203,18 +227,28 @@ class KeypointIK:
         scalar = np.isin(
             model.jnt_type, (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
         )
-        limited = scalar & (model.jnt_limited != 0)
+        scoped_scalar = scalar & quality[model.jnt_dofadr]
+        limited = scoped_scalar & (model.jnt_limited != 0)
         self._limit_adr = model.jnt_qposadr[limited]
         self._limit_range = model.jnt_range[limited]
-        self._scalar_dofs = model.jnt_dofadr[scalar]
-        self._root_dofs = model.jnt_dofadr[model.jnt_type == mujoco.mjtJoint.mjJNT_FREE]
+        self._scalar_dofs = model.jnt_dofadr[scoped_scalar]
+        self._root_dofs: list[np.ndarray] = []
+        self._rotation_dofs: list[np.ndarray] = []
         free_type = int(mujoco.mjtJoint.mjJNT_FREE)
         ball_type = int(mujoco.mjtJoint.mjJNT_BALL)
-        self._rotation_dofs = [
-            int(adr) + (3 if int(kind) == free_type else 0)
-            for kind, adr in zip(model.jnt_type, model.jnt_dofadr)
-            if int(kind) in (free_type, ball_type)
-        ]
+        for kind, address in zip(model.jnt_type, model.jnt_dofadr):
+            address = int(address)
+            if int(kind) == free_type:
+                indices = np.arange(address, address + 3)
+                indices = indices[quality[indices]]
+                if len(indices):
+                    self._root_dofs.append(indices)
+            if int(kind) in (free_type, ball_type):
+                start = address + (3 if int(kind) == free_type else 0)
+                indices = np.arange(start, start + 3)
+                indices = indices[quality[indices]]
+                if len(indices):
+                    self._rotation_dofs.append(indices)
         self._prev: tuple[float, np.ndarray] | None = None
         self._last_time: float | None = None
 
@@ -334,12 +368,12 @@ class KeypointIK:
             if (
                 np.abs(dq[self._scalar_dofs]).max(initial=0.0) > cfg.max_joint_speed
                 or any(
-                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_joint_speed
-                    for adr in self._rotation_dofs
+                    np.linalg.norm(dq[indices]) > cfg.max_joint_speed
+                    for indices in self._rotation_dofs
                 )
                 or any(
-                    np.linalg.norm(dq[adr : adr + 3]) > cfg.max_root_linear_speed
-                    for adr in self._root_dofs
+                    np.linalg.norm(dq[indices]) > cfg.max_root_linear_speed
+                    for indices in self._root_dofs
                 )
             ):
                 flags |= Flag.GLITCH
