@@ -2,6 +2,13 @@
 
 ## 0.3.0 (unreleased)
 
+- **External recording regression.** Freezes hashes and compiled model identity,
+  checks annotated raw quality and restarts, and compares accepted poses plus
+  baseline-scheduled estimates. Explicit baseline input loads are retained as
+  inputs. Real/synthetic origins and independent reference roles remain explicit.
+  Force/torque and EMG adapters use declared units, instrument calibration, clock
+  mapping and held-out roles; missing/gap samples do not become comparisons.
+
 - **Study preflight.** Checks required landmark observability on declared task
   DOFs and postures, allowing free nuisance motion unless explicitly fixed.
   Reports model/configuration hashes, resolved settings, registration, declared

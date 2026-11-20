@@ -29,6 +29,8 @@ Archive the shadow revision, lockfile, prepared model, acquisition configuration
 and protocol. Session provenance records dependency/source commits and dirty
 state. `myosuite-shadow` runs replay/report tools, `myosuite-shadow-track` runs
 acquisition and `myosuite-shadow-validate` evaluates independent probes.
+`myosuite-shadow-preflight` checks study configuration and geometry;
+`myosuite-shadow-recordings` freezes, audits and reprocesses external recordings.
 
 ## Optional editable MyoSuite development
 
@@ -92,7 +94,7 @@ that remote CI has passed.
 
 ## Local verification baseline
 
-Shadow's preflight local suite passed **243 tests**, with Ruff lint/format and
+Shadow's combined local suite passed **262 tests**, with Ruff lint/format and
 `uv lock --check` passing. The publication audit found no credentials, generated
 binaries, participant recordings or model weights among the candidate shadow
 changes. Full and targeted MyoSuite pre-commit hooks passed before the core commit

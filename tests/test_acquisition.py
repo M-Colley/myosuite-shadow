@@ -434,3 +434,63 @@ def test_fidelity_fallback_cannot_enter_a_high_fidelity_protocol(setup):
             )
         )
     assert len(live.submissions) == 1
+
+
+def test_reprocessing_uses_injected_receipt_clock_and_finite_values(setup, tmp_path):
+    _, solver, live, points = setup
+    receipt = [500.0]
+    with TrackedSession(
+        live, solver, clock=lambda: receipt[0], raw_dir=tmp_path
+    ) as session:
+        assert session.submit(_frame(points, capture_unix=500, receive_unix=500))
+        receipt[0] = float("nan")
+        with pytest.raises(ValueError, match="clock must be finite"):
+            session.submit(_frame(points, time_s=1.1, sequence=2))
+        assert session.accepted == 1
+    assert len(live.submissions) == 1
+    assert len(_decisions(tmp_path)) == 1
+
+
+def test_default_clock_uses_now_at_call_time(setup, monkeypatch):
+    _, solver, live, points = setup
+    with TrackedSession(live, solver) as session:
+        monkeypatch.setattr("myosuite_shadow.acquisition.now", lambda: 501.0)
+        assert session.submit(_frame(points, capture_unix=501, receive_unix=501))
+
+
+@pytest.mark.parametrize("bad", [np.array([1]), np.array([np.nan, 1])])
+def test_external_load_provider_validates_before_accepted_decision(
+    setup, tmp_path, bad
+):
+    _, solver, live, points = setup
+    with TrackedSession(
+        live, solver, external_loads=lambda t, q: bad, raw_dir=tmp_path
+    ) as session:
+        with pytest.raises(ValueError, match="finite model.nv"):
+            session.submit(_frame(points))
+        assert session.accepted == 0
+    assert not live.submissions and not _decisions(tmp_path)
+    assert len(list(read_frames(tmp_path / "tracking.jsonl"))) == 1
+
+
+def test_external_load_provider_is_accepted_frame_only_and_excludes_held_mass(setup):
+    _, solver, live, points = setup
+    calls = []
+
+    def provider(time_s, qpos):
+        calls.append((time_s, qpos.copy()))
+        return [1.0, 2.0]
+
+    with pytest.raises(ValueError, match="held mass"):
+        TrackedSession(
+            live,
+            solver,
+            external_loads=provider,
+            config=AcquisitionConfig(held_mass_kg=1, load_site="hand"),
+        )
+    with TrackedSession(live, solver, external_loads=provider) as session:
+        assert not session.submit(_frame(points, positions={}))
+        assert session.submit(_frame(points, sequence=2, time_s=1.1))
+    assert len(calls) == 1 and calls[0][0] == 1.1
+    np.testing.assert_allclose(calls[0][1], _POSE, atol=1e-5)
+    np.testing.assert_array_equal(live.submissions[0][0][2], [1.0, 2.0])
