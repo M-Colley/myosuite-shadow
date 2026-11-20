@@ -120,3 +120,13 @@ missing values outside coverage. Scenario bands are not confidence intervals.
 Raw frames flush separately from model checkpoints and may include additional
 frames after a crash. The accepted pose/decision journal determines live state;
 retain both sets of evidence.
+
+Resume keeps `.resume-recovery.zip` until replay and the recovered checkpoint
+commit. If recovery is interrupted, retry `--resume`: the journal restores the
+original pending inputs before replay. Reporting and sensitivity refuse a session
+with pending recovery. Resume configuration is checked against the original
+record before any restoration changes the session.
+
+If checkpoint writing, file closure or a sink fails during `close()`, correct the
+I/O problem and call `close()` again. The model rejects new inputs once closing
+starts and continues remaining finalization without duplicating the live summary.

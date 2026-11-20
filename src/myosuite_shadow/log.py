@@ -32,8 +32,10 @@ import io
 import json
 import os
 import platform
+import shutil
 import subprocess
 import time
+import zipfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +60,8 @@ RECORD, ESTIMATES, INPUTS, EVENTS, CHECKPOINT, MODEL = (
     "model.mjb",
 )
 OPERATIONS = "operations.jsonl"
+RECOVERY = ".resume-recovery.zip"
+_RECOVERY_FILES = (RECORD, CHECKPOINT, INPUTS, ESTIMATES, EVENTS, OPERATIONS)
 _PACKAGES = (
     "myosuite-shadow",
     "myosuite",
@@ -296,6 +300,7 @@ class SessionWriter:
         Returns:
             Writer, checkpoint, pending input rows and their replay operations.
         """
+        cls.restore_recovery(log_dir)
         checkpoint = json.loads((log_dir / CHECKPOINT).read_text(encoding="utf-8"))
         record = json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
         offsets = checkpoint["offsets"]
@@ -303,6 +308,7 @@ class SessionWriter:
             path = log_dir / name
             if (
                 not isinstance(offset, int)
+                or isinstance(offset, bool)
                 or offset < 0
                 or not path.exists()
                 or offset > path.stat().st_size
@@ -328,6 +334,8 @@ class SessionWriter:
                 dict(op, input=op["input"] - restored_count) for op in operations
             ]
             validate_operations(operations, len(pending))
+        _prepare_recovery(log_dir, offsets)
+        if has_schedule:
             _truncate(log_dir / OPERATIONS, offsets[OPERATIONS])
         _truncate(log_dir / INPUTS, offsets[INPUTS])
         _truncate(log_dir / ESTIMATES, offsets[ESTIMATES])
@@ -339,33 +347,128 @@ class SessionWriter:
         self.input_count = len(input_rows)
         self._log_evaluation_time = "evaluation_unix" in input_header
         self._log_joint_details = "reserve_0" in _read_csv(log_dir / ESTIMATES)[0]
-        self._files = {
-            name: open(log_dir / name, "ab")  # noqa: SIM115
-            for name in (ESTIMATES, INPUTS, EVENTS)
-        }
-        # A legacy resume starts a schedule covering its existing inputs too.
-        if not has_schedule:
-            with open(log_dir / OPERATIONS, "wb") as f:
-                for i in range(self.input_count):
-                    f.write(
-                        (
-                            json.dumps({"kind": "pose", "input": i, "estimate": True})
-                            + "\n"
-                        ).encode()
-                    )
-        self._files[OPERATIONS] = open(log_dir / OPERATIONS, "ab")
-        if not has_schedule:
-            record["schedule_reconstructed"] = True
-        record["resumes"].append(
-            {
-                "resumed_utc": datetime.now(timezone.utc).isoformat(),
-                "checkpoint_time": checkpoint["state"]["last_pose"],
-                "replayed_inputs": len(pending),
-                "packages": package_provenance(),
-            }
-        )
-        _write_json(log_dir / RECORD, record)
+        self._files = {}
+        try:
+            for name in (ESTIMATES, INPUTS, EVENTS):
+                self._files[name] = open(log_dir / name, "ab")  # noqa: SIM115
+            # A legacy resume starts a schedule covering its existing inputs too.
+            if not has_schedule:
+                with open(log_dir / OPERATIONS, "wb") as f:
+                    for i in range(self.input_count):
+                        f.write(
+                            (
+                                json.dumps(
+                                    {"kind": "pose", "input": i, "estimate": True}
+                                )
+                                + "\n"
+                            ).encode()
+                        )
+            self._files[OPERATIONS] = open(log_dir / OPERATIONS, "ab")
+            if not has_schedule:
+                record["schedule_reconstructed"] = True
+            record["resumes"].append(
+                {
+                    "resumed_utc": datetime.now(timezone.utc).isoformat(),
+                    "checkpoint_time": checkpoint["state"]["last_pose"],
+                    "replayed_inputs": len(pending),
+                    "packages": package_provenance(),
+                }
+            )
+            _write_json(log_dir / RECORD, record, durable=True)
+        except BaseException:
+            self.close_files()
+            raise
         return self, checkpoint, pending, operations
+
+    @staticmethod
+    def read_record(log_dir: Path) -> dict[str, Any]:
+        """Read original metadata for preflight without applying pending recovery."""
+        if not (log_dir / RECOVERY).exists():
+            return json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
+        with zipfile.ZipFile(log_dir / RECOVERY) as archive:
+            files = _recovery_manifest(archive)
+            item, data = files[RECORD], archive.read(RECORD)
+            if (
+                not isinstance(item, dict)
+                or item.get("offset") != 0
+                or item.get("size") != len(data)
+                or item.get("sha256") != hashlib.sha256(data).hexdigest()
+            ):
+                raise ValueError("invalid resume recovery record checksum/metadata")
+            return json.loads(data)
+
+    @staticmethod
+    def restore_recovery(log_dir: Path) -> None:
+        """Restore an interrupted resume transaction, retaining its durable journal."""
+        path = log_dir / RECOVERY
+        if not path.exists():
+            return
+        with zipfile.ZipFile(path) as archive:
+            files = _recovery_manifest(archive)
+            for name, item in files.items():
+                if item is None:
+                    if name != OPERATIONS:
+                        raise ValueError("required recovery file is missing")
+                    continue
+                if not isinstance(item, dict):
+                    raise ValueError("invalid resume recovery file metadata")
+                offset, size = item.get("offset"), item.get("size")
+                if (
+                    not isinstance(offset, int)
+                    or isinstance(offset, bool)
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or not 0 <= offset <= size
+                    or name in (RECORD, CHECKPOINT)
+                    and offset != 0
+                    or archive.getinfo(name).file_size != size - offset
+                ):
+                    raise ValueError("invalid resume recovery file bounds")
+                if offset and (
+                    not (log_dir / name).exists()
+                    or (log_dir / name).stat().st_size < offset
+                ):
+                    raise ValueError("recovery checkpoint prefix is missing")
+                digest = hashlib.sha256()
+                with archive.open(name) as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != item.get("sha256"):
+                    raise ValueError("resume recovery checksum mismatch")
+            checkpoint = json.loads(archive.read(CHECKPOINT))
+            for name in (INPUTS, ESTIMATES, EVENTS, OPERATIONS):
+                if files[name] is not None and files[name]["offset"] != checkpoint[
+                    "offsets"
+                ].get(name, 0):
+                    raise ValueError(
+                        "recovery file offset differs from original checkpoint"
+                    )
+            # Validate every backup before modifying any file; keep checkpoint last.
+            for name in (*[n for n in _RECOVERY_FILES if n != CHECKPOINT], CHECKPOINT):
+                item = files[name]
+                target = log_dir / name
+                if item is None:
+                    target.unlink(missing_ok=True)
+                    continue
+                with target.open("r+b" if target.exists() else "w+b") as output:
+                    output.truncate(item["offset"])
+                    output.seek(item["offset"])
+                    with archive.open(name) as source:
+                        shutil.copyfileobj(source, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+
+    def commit_recovery(self, state: dict[str, Any]) -> None:
+        """Durably commit the fully replayed state before retiring its journal."""
+        self.write_checkpoint(state)
+        (self.log_dir / RECOVERY).unlink()
+        _sync_directory(self.log_dir)
+
+    def close_files(self) -> None:
+        """Release handles without committing a partially replayed state."""
+        for stream in self._files.values():
+            if not stream.closed:
+                stream.close()
 
     def _write(self, name: str, row: list[Any]) -> None:
         f = self._files[name]
@@ -448,6 +551,21 @@ class SessionWriter:
         """Append one experimenter event."""
         self._write(EVENTS, [unix, _num(session_time), label, json.dumps(data)])
 
+    def write_final_event(
+        self, unix: float, session_time: float | None, label: str, data: dict[str, Any]
+    ) -> None:
+        """Retry one final event without retaining a partial or duplicate CSV row."""
+        if getattr(self, "_final_event_written", False):
+            return
+        stream = self._files[EVENTS]
+        if not hasattr(self, "_final_event_offset"):
+            self._final_event_offset = stream.tell()
+        stream.flush()
+        stream.truncate(self._final_event_offset)
+        stream.seek(self._final_event_offset)
+        self.write_event(unix, session_time, label, data)
+        self._final_event_written = True
+
     def write_checkpoint(self, state: dict[str, Any], *, closed: bool = False) -> None:
         """Make the data durable, then atomically replace the checkpoint."""
         offsets = {}
@@ -463,9 +581,78 @@ class SessionWriter:
 
     def close(self, state: dict[str, Any]) -> None:
         """Write a final checkpoint and close the files."""
-        self.write_checkpoint(state, closed=True)
-        for f in self._files.values():
-            f.close()
+        if not getattr(self, "_final_checkpoint_written", False):
+            self.write_checkpoint(state, closed=True)
+            self._final_checkpoint_written = True
+        self.close_files()
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name != "nt":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _recovery_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
+    manifest = json.loads(archive.read("manifest.json"))
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid resume recovery manifest")
+    files, version = manifest.get("files", {}), manifest.get("version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != 1
+        or not isinstance(files, dict)
+        or set(files) != set(_RECOVERY_FILES)
+    ):
+        raise ValueError("invalid resume recovery manifest")
+    expected = {"manifest.json"} | {n for n, item in files.items() if item is not None}
+    if set(archive.namelist()) != expected or len(archive.namelist()) != len(expected):
+        raise ValueError("invalid resume recovery archive paths")
+    return files
+
+
+def _prepare_recovery(log_dir: Path, offsets: dict[str, int]) -> None:
+    journal = log_dir / RECOVERY
+    if journal.exists():
+        return
+    temporary = journal.with_suffix(".zip.tmp")
+    files = {}
+    with temporary.open("w+b") as output:
+        with zipfile.ZipFile(output, "w") as archive:
+            for name in _RECOVERY_FILES:
+                path = log_dir / name
+                if not path.exists():
+                    if name != OPERATIONS:
+                        raise ValueError(f"required session file is missing: {name}")
+                    files[name] = None
+                    continue
+                offset = offsets.get(name, 0) if name not in (RECORD, CHECKPOINT) else 0
+                digest, count = hashlib.sha256(), 0
+                with (
+                    path.open("rb") as source,
+                    archive.open(name, "w", force_zip64=True) as backup,
+                ):
+                    source.seek(offset)
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        backup.write(chunk)
+                        digest.update(chunk)
+                        count += len(chunk)
+                files[name] = {
+                    "offset": offset,
+                    "size": offset + count,
+                    "sha256": digest.hexdigest(),
+                }
+            archive.writestr(
+                "manifest.json", json.dumps({"version": 1, "files": files})
+            )
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, journal)
+    _sync_directory(log_dir)
 
 
 def _write_json(path: Path, value: dict[str, Any], *, durable: bool = False) -> None:
@@ -476,6 +663,8 @@ def _write_json(path: Path, value: dict[str, Any], *, durable: bool = False) -> 
             f.flush()
             os.fsync(f.fileno())
     os.replace(tmp, path)
+    if durable:
+        _sync_directory(path.parent)
 
 
 @dataclass(frozen=True)
@@ -743,6 +932,10 @@ def read_session(log_dir: str | Path) -> Session:
         The record, estimates, inputs and events as arrays.
     """
     log_dir = Path(log_dir)
+    if (log_dir / RECOVERY).exists():
+        raise ValueError(
+            "unfinished session recovery; retry ShadowModel.resume before reading"
+        )
     record = json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
     names, nq, nu = (
         record["model"]["actuators"],

@@ -29,7 +29,6 @@ sustained hold). The first estimate after a gap carries
 from __future__ import annotations
 
 import dataclasses
-import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -53,7 +52,6 @@ from myosuite_shadow.clock import now
 from myosuite_shadow.flags import Flag
 from myosuite_shadow.log import (
     MODEL,
-    RECORD,
     SessionWriter,
     model_sha256,
     replay_operations,
@@ -252,6 +250,9 @@ class ShadowModel:
         self.optimizer = StaticOptimizer(model, cfg.optimization)
         self.config = dataclasses.replace(config, optimization=self.optimizer.config)
         self._closed = False
+        self._closing = False
+        self._remaining_sinks = list(self.sinks)
+        self._final_event = None
         self._initial_fatigue_logged = False
         muscles = model.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE
         self.fatigue = (
@@ -283,7 +284,7 @@ class ShadowModel:
         Fatigue keeps integrating: the next estimate's load covers the time
         since the previous estimate, unless the pause exceeds ``max_gap``.
         """
-        if self._closed:
+        if self._closed or self._closing:
             raise RuntimeError("the shadow model is closed")
         if _record and self.log is not None:
             self.log.write_operation("reset")
@@ -338,7 +339,7 @@ class ShadowModel:
             the optimization is skipped.
         """
         start = time.perf_counter()
-        if self._closed:
+        if self._closed or self._closing:
             raise RuntimeError("the shadow model is closed")
         raw = np.array(qpos, dtype=np.float64)
         ext = None if external_qfrc is None else np.array(external_qfrc, dtype=float)
@@ -463,11 +464,37 @@ class ShadowModel:
             unix: Wall-clock time of the event (default now).
             **data: JSON-serialisable details.
         """
+        if self._closed or self._closing:
+            raise RuntimeError("the shadow model is closed")
         unix = now() if unix is None else float(unix)
         if self.log is not None:
             self.log.write_event(unix, self._last_pose, label, data)
         for sink in self.sinks:
             sink.event(unix, label, data)
+
+    def _mark_final_event(self, label: str, **data: Any) -> None:
+        """Retain CSV/fanout progress for the live runner's retryable summary."""
+        if self._final_event is None:
+            self._final_event = {
+                "unix": now(),
+                "time": self._last_pose,
+                "label": label,
+                "data": data,
+                "recorded": False,
+                "sink": 0,
+            }
+        event = self._final_event
+        if not event["recorded"]:
+            if self.log is not None:
+                self.log.write_final_event(
+                    event["unix"], event["time"], event["label"], event["data"]
+                )
+            event["recorded"] = True
+        while event["sink"] < len(self.sinks):
+            self.sinks[event["sink"]].event(
+                event["unix"], event["label"], event["data"]
+            )
+            event["sink"] += 1
 
     # ------------------------------------------------------------------
     # Checkpoints
@@ -552,45 +579,65 @@ class ShadowModel:
             ValueError: If *model* is not the session's model.
         """
         log_dir = Path(log_dir)
-        record = json.loads((log_dir / RECORD).read_text(encoding="utf-8"))
+        record = SessionWriter.read_record(log_dir)
         if model is None:
             model = mujoco.MjModel.from_binary_path(str(log_dir / MODEL))
         if model_sha256(model) != record["model_sha256"]:
             raise ValueError("model differs from the session's (model_sha256)")
         self = cls.__new__(cls)
         self._setup(model, ShadowModelConfig.from_dict(record["config"]), sinks)
-        self.log, checkpoint, pending, operations = SessionWriter.reopen(
-            log_dir,
-            model.nv,
-            fatigue_count=None
-            if self.fatigue is None
-            else len(self.fatigue.muscle_ids),
-        )
-        self._restore(checkpoint["state"])
-        nq, nv = model.nq, model.nv
-        inputs = []
-        for row in pending:
-            values = [float(v) if v != "" else None for v in row]
-            qpos = np.array(values[4 : 4 + nq])
-            ext = np.array(values[4 + nq : 4 + nq + nv])
-            evaluation = values[4 + nq + nv] if len(values) > 4 + nq + nv else None
-            inputs.append(
-                (values[0], qpos, ext, int(values[3]), values[2], values[1], evaluation)
+        self.log = None
+        try:
+            self.log, checkpoint, pending, operations = SessionWriter.reopen(
+                log_dir,
+                model.nv,
+                fatigue_count=None
+                if self.fatigue is None
+                else len(self.fatigue.muscle_ids),
             )
-        list(replay_operations(self, inputs, operations))
-        self.mark("resumed", replayed_inputs=len(pending))
+            self._restore(checkpoint["state"])
+            nq, nv = model.nq, model.nv
+            inputs = []
+            for row in pending:
+                values = [float(v) if v != "" else None for v in row]
+                qpos = np.array(values[4 : 4 + nq])
+                ext = np.array(values[4 + nq : 4 + nq + nv])
+                evaluation = values[4 + nq + nv] if len(values) > 4 + nq + nv else None
+                inputs.append(
+                    (
+                        values[0],
+                        qpos,
+                        ext,
+                        int(values[3]),
+                        values[2],
+                        values[1],
+                        evaluation,
+                    )
+                )
+            list(replay_operations(self, inputs, operations))
+            self.mark("resumed", replayed_inputs=len(pending))
+            self.log.commit_recovery(self._state())
+        except BaseException:
+            if self.log is not None:
+                self.log.close_files()
+                self.log = None
+            SessionWriter.restore_recovery(log_dir)
+            self.close()
+            raise
         return self
 
     def close(self) -> None:
         """Write a final checkpoint, close the session log and the sinks."""
         if self._closed:
             return
-        self._closed = True
+        self._closing = True
         if self.log is not None:
             self.log.close(self._state())
             self.log = None
-        for sink in self.sinks:
-            sink.close()
+        while self._remaining_sinks:
+            self._remaining_sinks[0].close()
+            self._remaining_sinks.pop(0)
+        self._closed = True
 
     def __enter__(self) -> ShadowModel:
         return self

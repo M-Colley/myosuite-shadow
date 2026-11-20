@@ -13,7 +13,7 @@ import mujoco
 from myosuite_shadow.acquisition import AcquisitionConfig, TrackedSession
 from myosuite_shadow.ik import IKConfig, Keypoint, KeypointIK
 from myosuite_shadow.live import LiveShadowModel
-from myosuite_shadow.log import read_session
+from myosuite_shadow.log import SessionWriter
 from myosuite_shadow.pipeline import ShadowModel, ShadowModelConfig
 from myosuite_shadow.tracking import (
     ClockMapping,
@@ -87,13 +87,13 @@ def main(argv: list[str] | None = None) -> None:
             expected_person_id=quest.get("person_id"),
         )
     if args.resume:
-        recorded = read_session(args.log_dir)
+        recorded = SessionWriter.read_record(args.log_dir)
         if "shadow" in settings:
             with ShadowModel(
                 model, ShadowModelConfig.from_dict(settings["shadow"])
             ) as candidate:
                 expected = candidate.config
-            if expected != ShadowModelConfig.from_dict(recorded.record["config"]):
+            if expected != ShadowModelConfig.from_dict(recorded["config"]):
                 parser.error(
                     "resume settings must match the recorded shadow configuration"
                 )
