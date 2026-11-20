@@ -39,6 +39,10 @@ multi-state actuators and artificial body gravity compensation are rejected.
 
 ## Configure and run
 
+Run the [observability and protocol preflight](preflight.md) on the prepared
+configuration and measured task postures before acquisition. Keep the report with
+the session evidence.
+
 The track command accepts a JSON object:
 
 | Field | Meaning |

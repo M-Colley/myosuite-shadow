@@ -16,7 +16,7 @@ estimates under a minimum-effort assumption. Start with
 ## Install
 
 Version 0.3 pins the published MyoSuite source commit
-[`ba3e73f2d38305fcd7093e26bb85f07574451a4c`](https://github.com/MyoHub/myosuite/commit/ba3e73f2d38305fcd7093e26bb85f07574451a4c).
+[`87c1896b12b99683aecc83d6aab00cc66243a50f`](https://github.com/MyoHub/myosuite/commit/87c1896b12b99683aecc83d6aab00cc66243a50f).
 This supplies the study-support APIs, corrected fatigue censoring and MVC model
 checks. It is not an official MyoSuite release or evidence of participant
 accuracy. From this repository, install the frozen study environment:

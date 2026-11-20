@@ -14,7 +14,7 @@ on:
       myosuite_ref:
         description: Full commit SHA of the MyoSuite study-support prerequisite
         required: true
-        default: ba3e73f2d38305fcd7093e26bb85f07574451a4c
+        default: 87c1896b12b99683aecc83d6aab00cc66243a50f
         type: string
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MYOSUITE_REPOSITORY: ${{ inputs.myosuite_repository || vars.MYOSUITE_REPOSITORY || 'MyoHub/myosuite' }}
-      MYOSUITE_REF: ${{ inputs.myosuite_ref || vars.MYOSUITE_REF || 'ba3e73f2d38305fcd7093e26bb85f07574451a4c' }}
+      MYOSUITE_REF: ${{ inputs.myosuite_ref || vars.MYOSUITE_REF || '87c1896b12b99683aecc83d6aab00cc66243a50f' }}
     defaults:
       run:
         working-directory: shadow
@@ -102,6 +102,7 @@ jobs:
           from myosuite.biomechanics.external_loads import held_mass_qfrc;
           from myosuite.biomechanics.streaming_kinematics import StreamingKinematics;
           from myosuite.biomechanics.camera import triangulate_point;
+          from myosuite.biomechanics.observability import landmark_observability;
           from myosuite_shadow.log import package_provenance;
           import os, pylsl, h5py;
           assert pylsl.library_version() >= pylsl.MIN_LIBLSL_VERSION;
@@ -115,6 +116,7 @@ jobs:
           ../myosuite-study-support/myosuite/tests/test_subject_calibration.py
           ../myosuite-study-support/myosuite/tests/test_streaming_kinematics.py
           ../myosuite-study-support/myosuite/tests/test_camera_reconstruction.py
+          ../myosuite-study-support/myosuite/tests/test_landmark_observability.py
       - run: uv run --no-sync python -m ruff check src tests benchmarks examples
       - run: uv run --no-sync python -m ruff format --check src tests examples
       - name: Benchmarks still run
