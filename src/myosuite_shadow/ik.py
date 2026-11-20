@@ -350,3 +350,194 @@ class KeypointIK:
         else:
             self.configuration.update(previous)
         return IKResult(q, residual, flags, usable, iterations)
+
+
+MHR70_JOINT_NAMES: tuple[str, ...] = (
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+    "left_big_toe_tip",
+    "left_small_toe_tip",
+    "left_heel",
+    "right_big_toe_tip",
+    "right_small_toe_tip",
+    "right_heel",
+    "right_thumb_tip",
+    "right_thumb_first_joint",
+    "right_thumb_second_joint",
+    "right_thumb_third_joint",
+    "right_index_tip",
+    "right_index_first_joint",
+    "right_index_second_joint",
+    "right_index_third_joint",
+    "right_middle_tip",
+    "right_middle_first_joint",
+    "right_middle_second_joint",
+    "right_middle_third_joint",
+    "right_ring_tip",
+    "right_ring_first_joint",
+    "right_ring_second_joint",
+    "right_ring_third_joint",
+    "right_pinky_tip",
+    "right_pinky_first_joint",
+    "right_pinky_second_joint",
+    "right_pinky_third_joint",
+    "right_wrist",
+    "left_thumb_tip",
+    "left_thumb_first_joint",
+    "left_thumb_second_joint",
+    "left_thumb_third_joint",
+    "left_index_tip",
+    "left_index_first_joint",
+    "left_index_second_joint",
+    "left_index_third_joint",
+    "left_middle_tip",
+    "left_middle_first_joint",
+    "left_middle_second_joint",
+    "left_middle_third_joint",
+    "left_ring_tip",
+    "left_ring_first_joint",
+    "left_ring_second_joint",
+    "left_ring_third_joint",
+    "left_pinky_tip",
+    "left_pinky_first_joint",
+    "left_pinky_second_joint",
+    "left_pinky_third_joint",
+    "left_wrist",
+    "left_olecranon",
+    "right_olecranon",
+    "left_cubital_fossa",
+    "right_cubital_fossa",
+    "left_acromion",
+    "right_acromion",
+    "neck",
+)
+
+_MHR70_ARM_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("right_shoulder", ("humerus_r", "humerus")),
+    ("right_elbow", ("ulna_r", "ulna")),
+    ("right_wrist", ("lunate_r", "lunate")),
+    ("right_index_third_joint", ("secondmc_r", "secondmc")),
+    ("right_pinky_third_joint", ("fifthmc_r", "fifthmc")),
+    ("left_shoulder", ("humerus_l",)),
+    ("left_elbow", ("ulna_l",)),
+    ("left_wrist", ("lunate_l",)),
+    ("left_index_third_joint", ("secondmc_l",)),
+    ("left_pinky_third_joint", ("fifthmc_l",)),
+)
+
+_MHR70_HAND_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("right_thumb_tip", ("distal_thumb_r", "distal_thumb")),
+    ("right_index_tip", ("distph2_r", "distph2")),
+    ("right_middle_tip", ("distph3_r", "distph3")),
+    ("right_ring_tip", ("distph4_r", "distph4")),
+    ("right_pinky_tip", ("5distph_r", "5distph")),
+    ("left_thumb_tip", ("distal_thumb_l",)),
+    ("left_index_tip", ("distph2_l",)),
+    ("left_middle_tip", ("distph3_l",)),
+    ("left_ring_tip", ("distph4_l",)),
+    ("left_pinky_tip", ("5distph_l",)),
+)
+
+_MHR70_LEG_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("right_hip", ("femur_r",)),
+    ("right_knee", ("tibia_r",)),
+    ("right_ankle", ("talus_r",)),
+    ("right_heel", ("calcn_r",)),
+    ("left_hip", ("femur_l",)),
+    ("left_knee", ("tibia_l",)),
+    ("left_ankle", ("talus_l",)),
+    ("left_heel", ("calcn_l",)),
+)
+
+
+def mhr70_keypoints(
+    model: mujoco.MjModel,
+    *,
+    include_hands: bool = True,
+    include_head: bool = True,
+    include_legs: bool = True,
+) -> tuple[Keypoint, ...]:
+    """Build MHR70 (SAM-3D-Body / InstantHMR) keypoints matched to ``model``.
+
+    Includes radial and ulnar metacarpal knuckles alongside shoulder, elbow and
+    wrist frames so forearm pronation/supination stays observable during live
+    upper-body tracking. Welded static bodies (e.g. a locked head on a fixed
+    thorax) are automatically skipped.
+    """
+    dynamic_bodies = {
+        model.body(b).name
+        for b in range(1, model.nbody)
+        if int(model.body_weldid[b]) != 0
+    }
+    dynamic_sites = {
+        model.site(s).name
+        for s in range(model.nsite)
+        if int(model.body_weldid[int(model.site_bodyid[s])]) != 0
+    }
+
+    groups = list(_MHR70_ARM_CANDIDATES)
+    if include_hands:
+        groups.extend(_MHR70_HAND_CANDIDATES)
+    if include_legs:
+        groups.extend(_MHR70_LEG_CANDIDATES)
+
+    selected: list[Keypoint] = []
+    for tracker_name, body_candidates in groups:
+        for bname in body_candidates:
+            if bname in dynamic_bodies:
+                selected.append(Keypoint(tracker_name, bname, "body"))
+                break
+
+    if include_head:
+        if "neck" in dynamic_bodies:
+            selected.append(Keypoint("neck", "neck", "body"))
+        if "gaze_origin" in dynamic_sites:
+            selected.append(Keypoint("nose", "gaze_origin", "site"))
+        elif "head" in dynamic_bodies:
+            selected.append(Keypoint("nose", "head", "body"))
+
+    return tuple(selected)
+
+
+def mhr70_frame_dict(
+    points_70x3: np.ndarray,
+    confidence_70: np.ndarray | None = None,
+    *,
+    cam_to_world: np.ndarray | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, float] | None]:
+    """Convert a ``(70, 3)`` MHR70 array into dicts for :meth:`KeypointIK.solve`."""
+    pts = np.asarray(points_70x3, dtype=np.float64)
+    n_joints = len(MHR70_JOINT_NAMES)
+    if pts.shape != (n_joints, 3):
+        raise ValueError(
+            f"points_70x3 must have shape ({n_joints}, 3), got {pts.shape}"
+        )
+    if cam_to_world is not None:
+        rot = np.asarray(cam_to_world, dtype=np.float64)
+        if rot.shape != (3, 3):
+            raise ValueError(f"cam_to_world must have shape (3, 3), got {rot.shape}")
+        pts = pts @ rot.T
+
+    pos_dict = {name: pts[i].copy() for i, name in enumerate(MHR70_JOINT_NAMES)}
+    if confidence_70 is None:
+        return pos_dict, None
+    conf = np.asarray(confidence_70, dtype=np.float64)
+    if conf.shape != (n_joints,):
+        raise ValueError(
+            f"confidence_70 must have shape ({n_joints},), got {conf.shape}"
+        )
+    conf_dict = {name: float(conf[i]) for i, name in enumerate(MHR70_JOINT_NAMES)}
+    return pos_dict, conf_dict
