@@ -49,3 +49,22 @@ def test_noise_is_on_hinges_only() -> None:
     std = np.degrees((noisy - qpos).std(axis=0))
     np.testing.assert_allclose(std[5], 0.5, rtol=0.1)  # the hinge after slide + ball
     np.testing.assert_array_equal(noisy[:, :5], qpos[:, :5])
+
+
+def test_reaches_handle_low_rates_unlimited_hinges_and_nonhinge_models() -> None:
+    unlimited = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody><body><joint name="j" axis="0 1 0"/>'
+        '<geom size=".1"/></body></worldbody></mujoco>'
+    )
+    low_rate = reaching_motion(unlimited, 1.0, 2.0, seed=0)
+    assert low_rate.shape == (2, 1)
+    dense = reaching_motion(unlimited, 30.0, 3.0, seed=1)
+    assert np.ptp(dense[:, 0]) > 0.2
+    ball_only = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody><body><joint type="ball"/><geom size=".1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    assert reaching_motion(ball_only, 10.0, 0.5, seed=0).shape == (5, 4)
+    for rate, duration in ((0.0, 1.0), (-10.0, 1.0), (10.0, 0.0), (np.nan, 1.0)):
+        with pytest.raises(ValueError, match="rate and duration"):
+            reaching_motion(unlimited, rate, duration, seed=0)

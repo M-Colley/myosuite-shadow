@@ -765,6 +765,12 @@ def read_session(log_dir: str | Path) -> Session:
     )
 
     def block(prefix: str) -> np.ndarray | None:
+        if not names:
+            return (
+                np.empty((len(columns["time"]), 0), dtype=float)
+                if prefix == "a_"
+                else None
+            )
         keys = [f"{prefix}{n}" for n in names]
         if keys[0] not in by_name:
             return None

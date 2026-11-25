@@ -241,3 +241,28 @@ def test_smoothing_prevents_flips_of_poorly_observed_joints(
         results = [solver.solve(k / 90, f) for k, f in enumerate(frames)]
         glitches[smoothing] = sum(Flag.GLITCH in r.flags for r in results)
     assert glitches[1e-4] <= 0.5 * glitches[0.0] and glitches[0.0] >= 10
+
+
+def test_preflight_frame_validation_and_qp_failure_recovery(monkeypatch) -> None:
+    model = mujoco.MjModel.from_xml_string(_PLANAR)
+    with pytest.raises(ValueError, match="frame_type"):
+        ik.KeypointIK(model, [ik.Keypoint("hand", "hand", "unknown")])
+    with pytest.raises(KeyError):
+        ik.KeypointIK(model, [ik.Keypoint("hand", "missing_site", "site")])
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint("elbow", "fore"), ik.Keypoint("hand", "hand", "site")],
+        qpos0=np.array([0.3, 1.0]),
+    )
+    before = solver.configuration.q.copy()
+
+    def fail_solve(*args, **kwargs):
+        raise ik.mink.NoSolutionFound("infeasible")
+
+    monkeypatch.setattr(ik.mink, "solve_ik", fail_solve)
+    result = solver.solve(
+        0.0, {"elbow": np.array([0.3, 0, 0]), "hand": np.array([0.5, 0, 0])}
+    )
+    assert not result.usable and Flag.NOT_SOLVED in result.flags
+    np.testing.assert_array_equal(solver.configuration.q, before)
+    np.testing.assert_array_equal(result.qpos, before)

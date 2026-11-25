@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import mujoco
@@ -93,9 +94,43 @@ def test_sensitivity_brackets_the_recorded_estimates(
     assert (res.fatigue[0][covered] <= hi[covered]).all()
     assert res.fatigue.shape == (len(variants), len(recorded.time), elbow.nu)
     assert (tmp_path / "out" / "summary.csv").exists()
+    summary_rows = list(
+        csv.DictReader((tmp_path / "out" / "summary.csv").open(encoding="utf-8"))
+    )
+    window_rows = [row for row in summary_rows if row["variant"] == "window 9"]
+    assert len(window_rows) == elbow.nu
+    assert all(row["final_mf"] == "" for row in window_rows)
+    assert all(
+        row["mean_activation"] != "" and np.isfinite(float(row["mean_activation"]))
+        for row in window_rows
+    )
     assert (tmp_path / "out" / "bands.csv").read_text().count("\n") == len(
         recorded.time
     ) + 1
+
+
+def test_sensitivity_supports_zero_actuator_models_and_validates_variants(
+    tmp_path: Path,
+) -> None:
+    passive = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody><body><joint name="j"/><geom size=".1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    with ShadowModel(passive, ShadowModelConfig(window=5), log_dir=tmp_path / "s") as s:
+        for k in range(8):
+            s.push(k / 20, [0.1 * k])
+    res = run_sensitivity(tmp_path / "s", out_dir=tmp_path / "out")
+    assert res.activation.shape == (len(DEFAULT_VARIANTS), 4, 0)
+    assert res.fatigue is None
+    for bad in (
+        {"strength": 0.0},
+        {"fatigue_rate": -1.0},
+        {"recovery_rate": np.nan},
+        {"window": True},
+        {"window": 0},
+    ):
+        with pytest.raises(ValueError):
+            Variant("bad", **bad)
 
 
 def test_emg_envelope_and_median_frequency() -> None:

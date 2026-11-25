@@ -111,8 +111,25 @@ class ShadowModelConfig:
             raise ValueError(
                 f"gap_load must be 'rest' or 'hold', got {self.gap_load!r}"
             )
+        for name in ("window", "polyorder", "estimate_every"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
+        if self.lag is not None and (
+            isinstance(self.lag, bool) or not isinstance(self.lag, int)
+        ):
+            raise ValueError("lag must be an integer or None")
         if self.estimate_every < 1:
             raise ValueError("estimate_every must be at least 1")
+        if not np.isfinite(self.max_gap) or self.max_gap <= 0:
+            raise ValueError("max_gap must be finite and positive")
+        if (
+            not np.isfinite([self.reserve_limit, self.checkpoint_every]).all()
+            or min(self.reserve_limit, self.checkpoint_every) < 0
+        ):
+            raise ValueError(
+                "reserve_limit and checkpoint_every must be finite and nonnegative"
+            )
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> ShadowModelConfig:
@@ -362,6 +379,9 @@ class ShadowModel:
             raise ValueError(
                 "capture, evaluation and receive timestamps must be finite"
             )
+        if isinstance(flags, bool) or not isinstance(flags, int | Flag):
+            raise ValueError("flags must be an integer or Flag")
+        pose_flags = Flag(flags)
         if self.log is not None:
             if not self._initial_fatigue_logged:
                 if self.fatigue is not None:
@@ -373,7 +393,7 @@ class ShadowModel:
                 time_s,
                 receive,
                 capture_unix,
-                flags,
+                int(pose_flags),
                 raw,
                 ext,
                 estimate=estimate,
@@ -385,14 +405,14 @@ class ShadowModel:
         ):
             self._bridge_gap(self._last_pose, float(time_s))
             self.reset_tracking(_record=False)
-        state = self.kinematics.push(time_s, qpos)  # validates the pose
+        state = self.kinematics.push(time_s, raw)  # validates the pose
         self._last_pose = float(time_s)
         unix = next(
             float(stamp)
             for stamp in (capture_unix, evaluation_unix, receive)
             if stamp is not None
         )
-        self._window.append(_Pose(float(time_s), raw, ext, Flag(flags), unix))
+        self._window.append(_Pose(float(time_s), raw, ext, pose_flags, unix))
         frame = None
         if state is not None:
             self._since += 1

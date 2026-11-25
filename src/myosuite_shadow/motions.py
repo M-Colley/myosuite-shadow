@@ -51,22 +51,34 @@ def reaching_motion(
     """
     if (model.jnt_type == mujoco.mjtJoint.mjJNT_FREE).any():
         raise ValueError("Synthetic reaches need a fixed-base model")
-    joints = independent_hinges(model)
-    lo, hi = model.jnt_range[joints].T
-    lo, hi = lo + 0.2 * (hi - lo), hi - 0.2 * (hi - lo)
-    rng = np.random.default_rng(seed)
+    if not np.isfinite([rate, duration]).all() or rate <= 0 or duration <= 0:
+        raise ValueError("rate and duration must be finite and positive")
+    n_total = max(1, round(duration * rate))
     if start is None:
         start = model.key_qpos[0] if model.nkey else model.qpos0
-    n_total = round(duration * rate)
-    cur, poses = np.clip(start[model.jnt_qposadr[joints]], lo, hi), []
-    while sum(len(p) for p in poses) < n_total:
-        goal, n = rng.uniform(lo, hi), int(rng.uniform(0.5, 0.9) * rate)
-        s = np.arange(n) / n
-        poses.append(cur + (10 * s**3 - 15 * s**4 + 6 * s**5)[:, None] * (goal - cur))
-        poses.append(np.repeat(goal[None], int(0.3 * rate), 0))
-        cur = goal
+    joints = independent_hinges(model)
     qpos = np.tile(start, (n_total, 1))
-    qpos[:, model.jnt_qposadr[joints]] = np.concatenate(poses)[:n_total]
+    if len(joints):
+        lo, hi = model.jnt_range[joints].T.copy()
+        unlimited = model.jnt_limited[joints] == 0
+        lo[unlimited], hi[unlimited] = -np.pi, np.pi
+        lo, hi = lo + 0.2 * (hi - lo), hi - 0.2 * (hi - lo)
+        rng = np.random.default_rng(seed)
+        cur, poses = np.clip(start[model.jnt_qposadr[joints]], lo, hi), []
+        count = 0
+        while count < n_total:
+            goal = rng.uniform(lo, hi)
+            n = max(1, int(rng.uniform(0.5, 0.9) * rate))
+            hold = max(0, int(0.3 * rate))
+            s = np.arange(n) / n
+            poses.append(
+                cur + (10 * s**3 - 15 * s**4 + 6 * s**5)[:, None] * (goal - cur)
+            )
+            if hold:
+                poses.append(np.repeat(goal[None], hold, 0))
+            count += n + hold
+            cur = goal
+        qpos[:, model.jnt_qposadr[joints]] = np.concatenate(poses)[:n_total]
     project_joint_couplings(JointCouplings.from_model(model), qpos)
     return qpos
 

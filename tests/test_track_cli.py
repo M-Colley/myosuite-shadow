@@ -167,3 +167,57 @@ def test_resume_refuses_raw_input_output_alias_before_changing_session(
     assert error.value.code == 2
     assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
     assert len(tracked.read_text().splitlines()) == 2
+
+
+def test_resume_validates_registration_and_load_site_before_changing_session(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    config, raw = _fixture(elbow, tmp_path)
+    upper_model = tmp_path / "SUBJECT_UPPER.MJB"
+    mujoco.mj_saveModel(elbow, str(upper_model), None)
+    settings = json.loads(config.read_text())
+    settings["model"] = "SUBJECT_UPPER.MJB"
+    config.write_text(json.dumps(settings), encoding="utf-8")
+    log = tmp_path / "session"
+    main(["--config", str(config), "--frames", str(raw), "--log-dir", str(log)])
+    before = {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    bad_reg = {
+        **settings,
+        "registration": {
+            "rotation": np.eye(3).tolist(),
+            "translation_m": [0.0, 0.0, 0.0],
+            "target_frame": "camera_world",
+        },
+    }
+    config.write_text(json.dumps(bad_reg), encoding="utf-8")
+    with pytest.raises(ValueError, match="model_world"):
+        main(
+            [
+                "--config",
+                str(config),
+                "--frames",
+                str(raw),
+                "--log-dir",
+                str(log),
+                "--resume",
+            ]
+        )
+    assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
+    bad_site = {
+        **settings,
+        "acquisition": {"held_mass_kg": 1.0, "load_site": "missing_site"},
+    }
+    config.write_text(json.dumps(bad_site), encoding="utf-8")
+    with pytest.raises(KeyError):
+        main(
+            [
+                "--config",
+                str(config),
+                "--frames",
+                str(raw),
+                "--log-dir",
+                str(log),
+                "--resume",
+            ]
+        )
+    assert before == {p.name: p.read_bytes() for p in log.iterdir() if p.is_file()}
