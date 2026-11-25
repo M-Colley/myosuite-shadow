@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
         model_path = args.config.parent / model_path
     model = (
         mujoco.MjModel.from_binary_path(str(model_path))
-        if model_path.suffix == ".mjb"
+        if model_path.suffix.lower() == ".mjb"
         else mujoco.MjModel.from_xml_path(str(model_path))
     )
     ik_values = dict(settings.get("ik", {}))
@@ -75,7 +75,11 @@ def main(argv: list[str] | None = None) -> None:
     registration = (
         Registration(**settings["registration"]) if "registration" in settings else None
     )
+    if registration is not None and registration.target_frame != "model_world":
+        raise ValueError("acquisition registration must target model_world")
     policy = AcquisitionConfig(**settings.get("acquisition", {}))
+    if policy.load_site is not None:
+        model.site(policy.load_site)
     if args.frames is not None:
         policy = dataclasses.replace(policy, check_wallclock=False)
         decoder = None

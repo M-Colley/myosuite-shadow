@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import threading
 from pathlib import Path
 
@@ -148,6 +150,10 @@ def test_health_retains_last_frame_when_stale_or_worker_fails(
     latest = live.latest
     monkeypatch.setattr("myosuite_shadow.live.now", lambda: latest.frame_unix + 2.0)
     assert live.health["status"] == "stale" and live.health["age_s"] == 2.0
+    live.latest = dataclasses.replace(latest, frame_unix=float("nan"))
+    assert live.health["status"] == "stale" and live.health["age_s"] is None
+    json.dumps(live.health, allow_nan=False)
+    live.latest = latest
     live.submit(0.3, [np.nan])
     live._thread.join(10)
     assert live.health["status"] == "failed"

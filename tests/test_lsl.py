@@ -51,6 +51,7 @@ def test_estimates_and_markers_arrive_on_the_lsl_clock(elbow: mujoco.MjModel) ->
         stamps += ts
     marker, mstamp = marks_in.pull_sample(timeout=10)
     shadow.close()
+    sink.close()  # idempotent
     assert len(samples) == len(frames) + 1 and len(frames) == 8
     assert live is not None and abs(stamps[-1] - pushed_at) < 0.5
     samples, stamps = samples[:-1], stamps[:-1]

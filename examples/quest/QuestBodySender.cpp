@@ -199,6 +199,7 @@ struct QuestBodySender::Impl {
         socklen_t size = sizeof(peer);
 #endif
         for (int count = 0; count < 16; ++count) {
+            size = sizeof(peer);
             int length = int(recvfrom(socket, buffer, sizeof(buffer) - 1, 0,
                 reinterpret_cast<sockaddr*>(&peer), &size));
             if (length < 0) break;
@@ -257,7 +258,8 @@ struct QuestBodySender::Impl {
             << ",\"device\":" << quoted(device) << ",\"sdk_version\":" << quoted(sdk)
             << ",\"runtime\":" << quoted(runtime) << ",\"runtime_version\":" << runtimeVersion
             << ",\"is_active\":" << (locations.isActive ? "true" : "false")
-            << ",\"confidence\":" << (locations.isActive ? locations.confidence : 0)
+            << ",\"confidence\":" << ((locations.isActive && std::isfinite(locations.confidence))
+                ? std::clamp<double>(locations.confidence, 0.0, 1.0) : 0.0)
             << ",\"joints\":[";
         for (size_t j = 0; j < joints.size(); ++j) {
             if (j) out << ',';

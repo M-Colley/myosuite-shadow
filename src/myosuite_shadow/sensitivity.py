@@ -49,6 +49,17 @@ class Variant:
     recovery_rate: float = 1.0
     window: int | None = None
 
+    def __post_init__(self) -> None:
+        factors = (self.strength, self.fatigue_rate, self.recovery_rate)
+        if not np.isfinite(factors).all() or min(factors) <= 0:
+            raise ValueError("variant scale factors must be finite and positive")
+        if self.window is not None and (
+            isinstance(self.window, bool)
+            or not isinstance(self.window, int)
+            or self.window < 1
+        ):
+            raise ValueError("variant window must be a positive integer")
+
 
 DEFAULT_VARIANTS = (
     Variant("baseline"),
@@ -92,6 +103,12 @@ class SensitivityResult:
 
 def _variant_params(model, config: ShadowModelConfig, v: Variant) -> tuple:
     """Per-muscle F, R, r of the session, scaled for the variant."""
+    import mujoco
+
+    if not config.fatigue or not np.any(
+        model.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE
+    ):
+        return ()
     f = CumulativeFatigue(model)
     if config.fatigue_params:
         _apply_fatigue_params(model, f, config.fatigue_params)
@@ -141,13 +158,15 @@ def run_sensitivity(
         with ShadowModel(model, config) as shadow:
             frames = list(session.replay(shadow))
         t_v = np.array([f.state.time for f in frames])
-        a_v = np.array([f.optimization.activation for f in frames]).reshape(
-            -1, model.nu
-        )
+        a_v = np.array(
+            [f.optimization.activation for f in frames], dtype=float
+        ).reshape(len(frames), model.nu)
         m_v = (
             None
             if shadow.fatigue is None
-            else np.array([f.fatigue for f in frames]).reshape(-1, model.nu)
+            else np.array([f.fatigue for f in frames], dtype=float).reshape(
+                len(frames), model.nu
+            )
         )
         if times is None:
             times = t_v
@@ -183,14 +202,20 @@ def _write(result: SensitivityResult, out: Path) -> None:
         for i, (v, a) in enumerate(zip(result.variants, result.activation)):
             m = None if result.fatigue is None else result.fatigue[i]
             for j, name in enumerate(result.actuators):
-                finite = np.array([]) if m is None else m[:, j][np.isfinite(m[:, j])]
+                finite_m = np.array([]) if m is None else m[:, j][np.isfinite(m[:, j])]
+                finite_a = a[:, j][np.isfinite(a[:, j])]
+                final_mf = (
+                    float(m[-1, j])
+                    if m is not None and len(m) and np.isfinite(m[-1, j])
+                    else ""
+                )
                 w.writerow(
                     [
                         v.name,
                         name,
-                        float(finite.max()) if len(finite) else "",
-                        float(m[-1, j]) if m is not None and len(m) else "",
-                        float(a[:, j].mean()) if len(a) else "",
+                        float(finite_m.max()) if len(finite_m) else "",
+                        final_mf,
+                        float(finite_a.mean()) if len(finite_a) else "",
                     ]
                 )
     lo_m, hi_m = (None, None) if result.fatigue is None else result.band("fatigue")

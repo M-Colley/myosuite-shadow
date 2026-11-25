@@ -228,3 +228,36 @@ def test_invalid_evaluation_time_is_rejected_before_logging(
         with pytest.raises(ValueError, match="timestamps must be finite"):
             shadow.push(0.0, [1.2], evaluation_unix=np.nan)
     assert len(read_session(tmp_path).input_time) == 0
+
+
+def test_zero_actuator_session_reads_back_cleanly(tmp_path: Path) -> None:
+    passive = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody><body><joint name="j"/><geom size=".1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    with ShadowModel(passive, ShadowModelConfig(window=5), log_dir=tmp_path) as shadow:
+        for k in range(8):
+            shadow.push(k / 20, [0.05 * k])
+    session = read_session(tmp_path)
+    assert session.activation.shape == (4, 0) and session.fatigue is None
+    assert session.input_qpos.shape == (8, 1)
+
+
+def test_invalid_flags_and_config_fail_before_writing_operations(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    for kwargs in (
+        {"estimate_every": True},
+        {"window": True},
+        {"lag": True},
+        {"max_gap": 0.0},
+        {"reserve_limit": -0.1},
+        {"checkpoint_every": np.nan},
+    ):
+        with pytest.raises(ValueError):
+            ShadowModelConfig(**kwargs)
+    with ShadowModel(elbow, log_dir=tmp_path) as shadow:
+        with pytest.raises(ValueError, match="flags"):
+            shadow.push(0.0, [1.2], flags=True)
+        assert (tmp_path / "operations.jsonl").read_bytes() == b""
+    assert len(read_session(tmp_path).input_time) == 0

@@ -102,7 +102,7 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
     if session is not None:
         times, qpos = session.input_time, session.input_qpos
         base = ShadowModelConfig.from_dict(session.record["config"])
-        noise = args.noise_deg or 0.0
+        noise = 0.0 if args.noise_deg is None else args.noise_deg
     elif args.clip is not None:
         from myosuite.core.trajectory_io import (
             expand_motion_clip_to_model,
@@ -121,6 +121,8 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
         times = np.arange(len(qpos)) / args.rate
         base = ShadowModelConfig()
         noise = 0.5 if args.noise_deg is None else args.noise_deg
+    if not np.isfinite(noise) or noise < 0:
+        raise ValueError("noise_deg must be finite and nonnegative")
     if noise > 0:
         qpos = add_tracking_noise(model, qpos, noise, args.seed)
 

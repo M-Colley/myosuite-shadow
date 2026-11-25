@@ -177,6 +177,13 @@ class KeypointIK:
             raise ValueError("keypoint names must be unique")
         if set(cfg.required_keypoints) - set(names):
             raise ValueError("required_keypoints must be included in the mapping")
+        for kp in self.keypoints:
+            if kp.frame_type not in ("body", "site", "geom"):
+                raise ValueError(
+                    "frame_type must be 'body', 'site' or 'geom', "
+                    f"got {kp.frame_type!r}"
+                )
+            getattr(model, kp.frame_type)(kp.frame)
         if qpos0 is None:
             qpos0 = model.key_qpos[0] if model.nkey else model.qpos0
         self._couplings = JointCouplings.from_model(model)
@@ -235,8 +242,8 @@ class KeypointIK:
             for kp in used
         }
 
-    def _step(self, tasks: list) -> float:
-        """One IK step; returns its largest coordinate change."""
+    def _step(self, tasks: list) -> float | None:
+        """One IK step; returns its largest coordinate change, or None if unsolved."""
         cfg = self.config
         try:
             v = mink.solve_ik(
@@ -249,16 +256,21 @@ class KeypointIK:
                 constraints=self.constraints or None,
             )
         except mink.NoSolutionFound:
+            if not self.constraints:
+                return None
             # Couplings and limits can conflict at range edges: solve without the
             # hard couplings; the projection below restores them.
-            v = mink.solve_ik(
-                self.configuration,
-                tasks,
-                1.0,
-                cfg.solver,
-                cfg.damping,
-                limits=self.limits,
-            )
+            try:
+                v = mink.solve_ik(
+                    self.configuration,
+                    tasks,
+                    1.0,
+                    cfg.solver,
+                    cfg.damping,
+                    limits=self.limits,
+                )
+            except mink.NoSolutionFound:
+                return None
         self.configuration.integrate_inplace(v, 1.0)
         return float(np.abs(v).max(initial=0.0))
 
@@ -310,6 +322,11 @@ class KeypointIK:
         iterations = 0
         for iterations in range(1, cfg.max_iterations + 1):  # noqa: B007
             step = self._step(tasks)
+            if step is None:
+                flags |= Flag.NOT_SOLVED
+                self.configuration.update(previous)
+                residual = self._residuals(used, targets)
+                return IKResult(previous.copy(), residual, flags, False, iterations)
             if (
                 step < cfg.step_tolerance
                 or max(self._residuals(used, targets).values()) < cfg.tolerance

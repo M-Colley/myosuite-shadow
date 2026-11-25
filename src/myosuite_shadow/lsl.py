@@ -103,4 +103,7 @@ class LslSink:
 
     def close(self) -> None:
         """Release the outlets."""
-        del self.outlet, self.markers
+        if hasattr(self, "outlet"):
+            del self.outlet
+        if hasattr(self, "markers"):
+            del self.markers

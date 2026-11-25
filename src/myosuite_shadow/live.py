@@ -151,11 +151,11 @@ class LiveShadowModel:
         the capture/evaluation/receive clock. A stale frame should not drive feedback.
         """
         with self._cond:
-            age = (
-                None
-                if self.latest is None
-                else max(0.0, now() - self.latest.frame_unix)
-            )
+            if self.latest is None:
+                age = None
+            else:
+                elapsed = now() - self.latest.frame_unix
+                age = max(0.0, float(elapsed)) if np.isfinite(elapsed) else None
             if self._error is not None:
                 status = "failed"
             elif self._closed:
@@ -164,7 +164,7 @@ class LiveShadowModel:
                 status = "closing"
             elif self.latest is None:
                 status = "waiting"
-            elif age is not None and age > self.stale_after:
+            elif age is None or age > self.stale_after:
                 status = "stale"
             else:
                 status = "running"
