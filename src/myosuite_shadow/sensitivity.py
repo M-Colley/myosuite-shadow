@@ -18,7 +18,11 @@ from pathlib import Path
 
 import numpy as np
 from myosuite.biomechanics.static_optimization import StaticOptimizer
-from myosuite.core.muscle_conditions import CumulativeFatigue
+
+try:
+    from myo_sim.physics.fatigue import CumulativeFatigue
+except ImportError:
+    from myosuite.core.muscle_conditions import CumulativeFatigue
 
 from myosuite_shadow.calibration import scale_strength
 from myosuite_shadow.flags import Flag

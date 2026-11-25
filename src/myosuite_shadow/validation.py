@@ -270,8 +270,7 @@ def mvc_capacity(
     Returns:
         Signed predicted net joint torques [N m or N], NaN if unsupported.
     """
-    from myosuite.biomechanics.calibration import max_joint_torque
-
+    from myosuite_shadow.calibration import max_joint_torque
     from myosuite_shadow.log import model_sha256
 
     times, postures = np.asarray(times, float), np.asarray(postures, float)

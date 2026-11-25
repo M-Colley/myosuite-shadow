@@ -104,3 +104,38 @@ def test_fitted_rates_reach_the_shadow_model(
     record = read_session(tmp_path).record
     assert record["calibration"]["fatigue"]["F"] == fit.F
     assert ShadowModelConfig.from_dict(record["config"]) == shadow.config
+
+
+def test_dgf_user_force_scales_and_installed_compliant_tendons_are_rejected() -> None:
+    xml = """
+    <mujoco><size nuser_actuator="2"/>
+      <worldbody><body><joint name="elbow" axis="0 1 0" range="0 2"/>
+        <geom size=".1" mass="1"/><site name="s1" pos=".1 0 0"/></body>
+        <site name="s0" pos="0 .1 0"/></worldbody>
+      <tendon><spatial name="t"><site site="s0"/><site site="s1"/></spatial></tendon>
+      <actuator>
+        <muscle name="m1" tendon="t" force="120" lengthrange="0.1 0.2" user="1 120"/>
+        <muscle name="m2" tendon="t" force="80" lengthrange="0.1 0.2" user="2 80"/>
+      </actuator>
+    </mujoco>"""
+    model = mujoco.MjModel.from_xml_string(xml)
+    scaled = scale_strength(model, 1.5, ["m1"])
+    assert scaled.actuator_user[0, 1] == pytest.approx(180.0)
+    assert scaled.actuator_user[1, 1] == pytest.approx(80.0)
+    all_scaled = scale_strength(model, 0.5)
+    np.testing.assert_allclose(all_scaled.actuator_user[:, 1], [60.0, 40.0])
+
+    # Simulate CompliantTendons.install(model) zeroing native muscle gains.
+    installed = mujoco.MjModel.from_xml_string(xml)
+    installed.actuator_gaintype[:] = mujoco.mjtGain.mjGAIN_FIXED
+    installed.actuator_gainprm[:, 0] = 0.0
+    installed.actuator_biastype[:] = mujoco.mjtBias.mjBIAS_AFFINE
+    installed.actuator_biasprm[:, :3] = 0.0
+    with pytest.raises(ValueError, match="CompliantTendons"):
+        ShadowModel(installed)
+    with pytest.raises(ValueError, match="CompliantTendons"):
+        max_joint_torque(installed, np.array([0.5]), "elbow")
+    with pytest.raises(ValueError, match="CompliantTendons"):
+        strength_from_mvc(installed, np.array([0.5]), "elbow", 5.0)
+    with pytest.raises(ValueError, match="CompliantTendons"):
+        scale_strength(installed, 1.2)
