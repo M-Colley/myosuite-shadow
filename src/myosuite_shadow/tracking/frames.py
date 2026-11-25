@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 from dataclasses import dataclass, field
@@ -12,6 +13,27 @@ from scipy.optimize import linprog
 from scipy.spatial.transform import Rotation
 
 SCHEMA_VERSION = 1
+
+
+def _clean_json(value: Any) -> Any:
+    if value is None or isinstance(value, str | bool):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise ValueError("Out of range float values are not JSON compliant")
+        return float(value)
+    if isinstance(value, list | tuple):
+        return [_clean_json(item) for item in value]
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return json.loads(json.dumps(value, allow_nan=False))
+            out[key] = _clean_json(item)
+        return out
+    return json.loads(json.dumps(value, allow_nan=False))
 
 
 def _finite(value: float, name: str) -> float:
@@ -132,9 +154,7 @@ class TrackerFrame:
                 for n in vectors
             ):
                 raise ValueError("a tracked joint must also be valid")
-        object.__setattr__(
-            self, "metadata", json.loads(json.dumps(self.metadata, allow_nan=False))
-        )
+        object.__setattr__(self, "metadata", _clean_json(self.metadata))
 
     @property
     def inferred_joints(self) -> tuple[str, ...]:
@@ -147,10 +167,29 @@ class TrackerFrame:
 
     def record(self) -> dict[str, Any]:
         """Return a JSON-compatible record preserving source and quality fields."""
-        result = dataclasses.asdict(self)
-        for key in ("positions", "orientations"):
-            result[key] = {n: v.tolist() for n, v in result[key].items()}
-        return result
+        return {
+            "time_s": self.time_s,
+            "source_id": self.source_id,
+            "sequence": self.sequence,
+            "person_id": self.person_id,
+            "positions": {n: v.tolist() for n, v in self.positions.items()},
+            "confidence": dict(self.confidence),
+            "orientations": {n: v.tolist() for n, v in self.orientations.items()},
+            "position_valid": dict(self.position_valid),
+            "position_tracked": dict(self.position_tracked),
+            "orientation_valid": dict(self.orientation_valid),
+            "orientation_tracked": dict(self.orientation_tracked),
+            "capture_unix": self.capture_unix,
+            "evaluation_unix": self.evaluation_unix,
+            "receive_unix": self.receive_unix,
+            "prediction_s": self.prediction_s,
+            "time_kind": self.time_kind,
+            "coordinate_frame": self.coordinate_frame,
+            "transform_revision": self.transform_revision,
+            "skeleton_revision": self.skeleton_revision,
+            "metadata": copy.deepcopy(self.metadata),
+            "schema_version": self.schema_version,
+        }
 
     to_dict = record
 
@@ -253,28 +292,75 @@ class Registration:
         t.setflags(write=False)
         object.__setattr__(self, "rotation", r)
         object.__setattr__(self, "translation_m", t)
+        quat = Rotation.from_matrix(r).as_quat()
+        quat.setflags(write=False)
+        object.__setattr__(self, "_quat", quat)
 
     def apply(self, frame: TrackerFrame) -> TrackerFrame:
         """Transform observations; refuse an unhandled recenter/frame change."""
+        if not isinstance(frame, TrackerFrame):
+            raise TypeError("registration requires a TrackerFrame")
         if (
             frame.coordinate_frame != self.source_frame
             or frame.transform_revision != self.revision
         ):
             raise ValueError("registration does not match source frame/revision")
-        rot = Rotation.from_matrix(self.rotation)
-        return dataclasses.replace(
-            frame,
-            positions={
-                n: self.rotation @ p + self.translation_m
-                for n, p in frame.positions.items()
-            },
-            orientations={
-                n: (rot * Rotation.from_quat(q)).as_quat()
-                for n, q in frame.orientations.items()
-            },
-            coordinate_frame=self.target_frame,
-            metadata={**frame.metadata, "registration": self.record()},
+        if frame.positions:
+            pos_keys = tuple(frame.positions)
+            pts = (
+                np.array([frame.positions[k] for k in pos_keys], dtype=float)
+                @ self.rotation.T
+                + self.translation_m
+            )
+            pts.setflags(write=False)
+            positions = dict(zip(pos_keys, pts))
+        else:
+            positions = {}
+        if frame.orientations:
+            ori_keys = tuple(frame.orientations)
+            qs = np.array([frame.orientations[k] for k in ori_keys], dtype=float)
+            px, py, pz, pw = self._quat
+            qx, qy, qz, qw = qs.T
+            out_q = np.column_stack(
+                (
+                    pw * qx + px * qw + py * qz - pz * qy,
+                    pw * qy - px * qz + py * qw + pz * qx,
+                    pw * qz + px * qy - py * qx + pz * qw,
+                    pw * qw - px * qx - py * qy - pz * qz,
+                )
+            )
+            out_q.setflags(write=False)
+            orientations = dict(zip(ori_keys, out_q))
+        else:
+            orientations = {}
+        out = object.__new__(TrackerFrame)
+        for name in (
+            "time_s",
+            "source_id",
+            "sequence",
+            "person_id",
+            "confidence",
+            "position_valid",
+            "position_tracked",
+            "orientation_valid",
+            "orientation_tracked",
+            "capture_unix",
+            "evaluation_unix",
+            "receive_unix",
+            "prediction_s",
+            "time_kind",
+            "transform_revision",
+            "skeleton_revision",
+            "schema_version",
+        ):
+            object.__setattr__(out, name, getattr(frame, name))
+        object.__setattr__(out, "positions", positions)
+        object.__setattr__(out, "orientations", orientations)
+        object.__setattr__(out, "coordinate_frame", self.target_frame)
+        object.__setattr__(
+            out, "metadata", {**frame.metadata, "registration": self.record()}
         )
+        return out
 
     def record(self) -> dict[str, Any]:
         """Return a JSON-compatible spatial calibration."""

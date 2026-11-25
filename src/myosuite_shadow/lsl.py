@@ -78,6 +78,7 @@ class LslSink:
         self.outlet = pylsl.StreamOutlet(info)
         self.markers = pylsl.StreamOutlet(markers)
         self.fatigue = fatigue
+        self._zeros = [0.0] * model.nu
         self.sync()
 
     def sync(self) -> None:
@@ -86,12 +87,10 @@ class LslSink:
 
     def estimate(self, frame: ShadowFrame) -> None:
         """Push one estimate, stamped at its frame's time."""
-        sample = list(frame.optimization.activation)
+        sample = frame.optimization.activation.tolist()
         if self.fatigue:
             mf = frame.fatigue
-            sample += list(
-                np.zeros_like(frame.optimization.activation) if mf is None else mf
-            )
+            sample.extend(self._zeros if mf is None else mf.tolist())
         sample.append(float(int(frame.flags)))
         stamp = frame.frame_unix + self.offset if np.isfinite(frame.frame_unix) else 0.0
         self.outlet.push_sample(sample, stamp)

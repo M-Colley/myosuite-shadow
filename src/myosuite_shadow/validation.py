@@ -171,20 +171,42 @@ def sample_at(
     if not len(t_src):
         shape = (len(t_dst),) if flat else (len(t_dst), v.shape[1])
         return np.full(shape, np.nan)
-    out = np.column_stack(
-        [
-            np.interp(t_dst, t_src, v[:, j], left=np.nan, right=np.nan)
-            for j in range(v.shape[1])
-        ]
-    )
-    if len(t_src) > 1:
-        idx = np.clip(np.searchsorted(t_src, t_dst), 1, len(t_src) - 1)
+    if len(t_src) == 1:
+        out = np.full((len(t_dst), v.shape[1]), np.nan, dtype=float)
+        hit = t_dst == t_src[0]
+        if hit.any():
+            out[hit] = v[0]
+    else:
+        idx = np.clip(np.searchsorted(t_src, t_dst, side="left"), 1, len(t_src) - 1)
+        hit_lo = t_dst == t_src[idx - 1]
+        hit_hi = t_dst == t_src[idx]
         inside = (t_dst > t_src[idx - 1]) & (t_dst < t_src[idx])
-        invalid = breaks[idx]
+        invalid = breaks[idx].copy()
         if max_gap is not None:
             invalid |= (t_src[idx] - t_src[idx - 1]) > max_gap
-        out[inside & invalid] = np.nan
-    out[~np.isfinite(t_dst)] = np.nan
+        interp_mask = inside & ~invalid
+        if interp_mask.all():
+            alpha = ((t_dst - t_src[idx - 1]) / (t_src[idx] - t_src[idx - 1]))[:, None]
+            u = v[idx - 1]
+            out = v[idx] - u
+            out *= alpha
+            out += u
+        else:
+            out = np.full((len(t_dst), v.shape[1]), np.nan, dtype=float)
+            if hit_lo.any():
+                out[hit_lo] = v[idx[hit_lo] - 1]
+            if hit_hi.any():
+                out[hit_hi] = v[idx[hit_hi]]
+            if interp_mask.any():
+                j = idx[interp_mask]
+                alpha = (
+                    (t_dst[interp_mask] - t_src[j - 1]) / (t_src[j] - t_src[j - 1])
+                )[:, None]
+                u = v[j - 1]
+                diff = v[j] - u
+                diff *= alpha
+                diff += u
+                out[interp_mask] = diff
     return out[:, 0] if flat else out
 
 

@@ -31,6 +31,14 @@ def test_sample_at_keeps_exact_samples_and_respects_explicit_resets() -> None:
         break_before=np.array([False, True, False]),
     )
     np.testing.assert_allclose(out, [np.nan, 1, 1.5], equal_nan=True)
+    exact_with_nan = sample_at(
+        np.array([0.0, 1.0]),
+        np.array([[3.0, 4.0], [np.nan, np.nan]]),
+        np.array([0.0, 0.5, 1.0]),
+    )
+    np.testing.assert_allclose(
+        exact_with_nan, [[3.0, 4.0], [np.nan, np.nan], [np.nan, np.nan]], equal_nan=True
+    )
     assert np.isnan(sample_at(np.array([]), np.array([]), np.array([1.0]))[0])
 
 
