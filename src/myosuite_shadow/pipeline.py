@@ -47,7 +47,11 @@ from myosuite.biomechanics.streaming_kinematics import (
     KinematicState,
     StreamingKinematics,
 )
-from myosuite.core.muscle_conditions import CumulativeFatigue
+
+try:
+    from myo_sim.physics.fatigue import CumulativeFatigue
+except ImportError:
+    from myosuite.core.muscle_conditions import CumulativeFatigue
 
 from myosuite_shadow.clock import now
 from myosuite_shadow.flags import Flag
@@ -244,6 +248,7 @@ class ShadowModel:
     def _setup(
         self, model: mujoco.MjModel, config: ShadowModelConfig, sinks: tuple[Sink, ...]
     ) -> None:
+        _check_installed_dgf(model)
         self.model, self.config, self.sinks = model, config, tuple(sinks)
         cfg = config
         self.kinematics = StreamingKinematics(
@@ -597,6 +602,21 @@ class ShadowModel:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _check_installed_dgf(model: mujoco.MjModel) -> None:
+    """Reject models whose native muscle gains were zeroed by CompliantTendons."""
+    if model.nuser_actuator < 2:
+        return
+    dgf = (model.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE) & np.isin(
+        model.actuator_user[:, 0], (1.0, 2.0)
+    )
+    if np.any(dgf & (model.actuator_gaintype == mujoco.mjtGain.mjGAIN_FIXED)):
+        raise ValueError(
+            "CompliantTendons is installed on model (zeroing native muscle gains); "
+            "pass the compiled model before CompliantTendons(model) or call "
+            "plant.restore(model) first"
+        )
 
 
 def _apply_fatigue_params(
