@@ -34,6 +34,11 @@ from myosuite.physics.joint_coupling import JointCouplings, project_joint_coupli
 from myosuite_shadow.flags import Flag
 
 _FIRST_FRAME_POSTURE = 1e-4  # resolves redundancy only; no continuity prior yet
+_FRAME_ATTR = {
+    "body": "xpos",
+    "site": "site_xpos",
+    "geom": "geom_xpos",
+}
 
 try:
     import mink
@@ -217,6 +222,14 @@ class KeypointIK:
         ]
         self._prev: tuple[float, np.ndarray] | None = None
         self._last_time: float | None = None
+        self._frame_lookup = {
+            kp.name: (
+                _FRAME_ATTR[kp.frame_type],
+                int(getattr(model, kp.frame_type)(kp.frame).id),
+            )
+            for kp in self.keypoints
+            if kp.frame_type in _FRAME_ATTR
+        }
 
     def reset(self, qpos: np.ndarray | None = None) -> None:
         """Clear temporal priors after loss or a reference-space change."""
@@ -226,14 +239,20 @@ class KeypointIK:
         self._prev, self._last_time = None, None
 
     def _frame_position(self, kp: Keypoint) -> np.ndarray:
-        pose = self.configuration.get_transform_frame_to_world(kp.frame, kp.frame_type)
-        return pose.translation()
+        attr, frame_id = self._frame_lookup[kp.name]
+        return getattr(self.configuration.data, attr)[frame_id]
 
     def _residuals(self, used: list[Keypoint], targets: dict[str, np.ndarray]) -> dict:
-        return {
-            kp.name: float(np.linalg.norm(self._frame_position(kp) - targets[kp.name]))
-            for kp in used
-        }
+        if not used:
+            return {}
+        data = self.configuration.data
+        diff = np.empty((len(used), 3), dtype=float)
+        for i, kp in enumerate(used):
+            attr, fid = self._frame_lookup[kp.name]
+            diff[i] = getattr(data, attr)[fid]
+        diff -= np.array([targets[kp.name] for kp in used], dtype=float)
+        norms = np.sqrt((diff * diff).sum(axis=1))
+        return {kp.name: float(d) for kp, d in zip(used, norms)}
 
     def _step(self, tasks: list) -> float:
         """One IK step; returns its largest coordinate change."""

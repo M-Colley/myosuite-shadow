@@ -172,12 +172,6 @@ def _model_layout(model: mujoco.MjModel) -> dict[str, Any]:
     }
 
 
-def _csv_line(row: list[Any]) -> bytes:
-    buf = io.StringIO()
-    csv.writer(buf, lineterminator="\n").writerow(row)
-    return buf.getvalue().encode("utf-8")
-
-
 def _num(value: float | None) -> float | str:
     return "" if value is None else float(value)
 
@@ -270,6 +264,9 @@ class SessionWriter:
         self.input_count = 0
         self._log_joint_details = True
         self._log_evaluation_time = True
+        self._csv_buf = io.StringIO()
+        self._csv_writer = csv.writer(self._csv_buf, lineterminator="\n")
+        self._zero_ext = [0.0] * model.nv
         for name, cols in (
             (ESTIMATES, header),
             (INPUTS, inputs),
@@ -335,6 +332,9 @@ class SessionWriter:
         _truncate(log_dir / EVENTS, events.rfind(b"\n") + 1)
         self = cls.__new__(cls)
         self.log_dir, self.nv = log_dir, nv
+        self._csv_buf = io.StringIO()
+        self._csv_writer = csv.writer(self._csv_buf, lineterminator="\n")
+        self._zero_ext = [0.0] * nv
         input_header, input_rows = _read_csv(log_dir / INPUTS)
         self.input_count = len(input_rows)
         self._log_evaluation_time = "evaluation_unix" in input_header
@@ -368,8 +368,12 @@ class SessionWriter:
         return self, checkpoint, pending, operations
 
     def _write(self, name: str, row: list[Any]) -> None:
+        buf = self._csv_buf
+        buf.seek(0)
+        buf.truncate(0)
+        self._csv_writer.writerow(row)
         f = self._files[name]
-        f.write(_csv_line(row))
+        f.write(buf.getvalue().encode("utf-8"))
         f.flush()
 
     def write_input(
@@ -385,12 +389,31 @@ class SessionWriter:
         evaluation_unix: float | None = None,
     ) -> None:
         """Append one pushed pose; no external load is written as zeros."""
-        ext = np.zeros(self.nv) if external_qfrc is None else external_qfrc
-        row = [float(time_s), float(receive_unix), _num(capture_unix), int(flags)]
-        row += np.asarray(qpos, dtype=np.float64).tolist()
-        row += np.asarray(ext, dtype=np.float64).tolist()
+        q_list = (
+            qpos.tolist()
+            if isinstance(qpos, np.ndarray) and qpos.dtype == np.float64
+            else np.asarray(qpos, dtype=np.float64).tolist()
+        )
+        ext_list = (
+            self._zero_ext
+            if external_qfrc is None
+            else (
+                external_qfrc.tolist()
+                if isinstance(external_qfrc, np.ndarray)
+                and external_qfrc.dtype == np.float64
+                else np.asarray(external_qfrc, dtype=np.float64).tolist()
+            )
+        )
+        row: list[Any] = [
+            float(time_s),
+            float(receive_unix),
+            _num(capture_unix),
+            int(flags),
+        ]
+        row.extend(q_list)
+        row.extend(ext_list)
         if self._log_evaluation_time:
-            row += [_num(evaluation_unix)]
+            row.append(_num(evaluation_unix))
         self.write_operation(
             "pose", estimate=bool(estimate), evaluation_unix=evaluation_unix
         )
@@ -596,7 +619,9 @@ def _read_csv(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
-def _float(values: list[str]) -> np.ndarray:
+def _float(values: list[str] | np.ndarray) -> np.ndarray:
+    if isinstance(values, np.ndarray):
+        return values
     return np.array([float(v) if v != "" else np.nan for v in values], dtype=float)
 
 
@@ -733,6 +758,83 @@ def replay_operations(
                 yield frame
 
 
+def _fill_empty_csv_fields(text: str) -> str:
+    if text.startswith(","):
+        text = "nan" + text
+    if text.endswith(","):
+        text = text + "nan"
+    text = text.replace("\n,", "\nnan,").replace(",\n", ",nan\n")
+    return text.replace(",,", ",nan,").replace(",,", ",nan,")
+
+
+def _read_numeric_csv(path: Path) -> tuple[list[str], np.ndarray]:
+    text = path.read_text(encoding="utf-8")
+    header_line, _, body = text.partition("\n")
+    header = next(csv.reader([header_line.rstrip("\r")]))
+    n_cols = len(header)
+    lines = [ln.rstrip("\r") for ln in body.splitlines() if ln.strip()]
+    if not lines:
+        return header, np.empty((0, n_cols), dtype=float)
+    if '"' not in body:
+        filled = _fill_empty_csv_fields("\n".join(lines))
+        values = np.fromstring(filled.replace("\n", ","), dtype=float, sep=",")
+        if values.size == len(lines) * n_cols:
+            return header, values.reshape(len(lines), n_cols)
+    _, rows = _read_csv(path)
+    return header, np.array(
+        [[float(v) if v != "" else np.nan for v in r] for r in rows], dtype=float
+    ).reshape(-1, n_cols)
+
+
+def _read_estimates_csv(path: Path) -> tuple[list[str], dict[str, np.ndarray]]:
+    text = path.read_text(encoding="utf-8")
+    header_line, _, body = text.partition("\n")
+    header = next(csv.reader([header_line.rstrip("\r")]))
+    n_cols = len(header)
+    status_idx = header.index("status")
+    lines = [ln.rstrip("\r") for ln in body.splitlines() if ln.strip()]
+    if not lines:
+        est_data = np.empty((0, n_cols), dtype=float)
+        status_arr = np.empty(0, dtype=str)
+    else:
+        parsed = False
+        if '"' not in body:
+            statuses = []
+            numeric_lines = []
+            for ln in lines:
+                parts = ln.split(",", status_idx + 1)
+                statuses.append(parts[status_idx])
+                tail = parts[status_idx + 1] if len(parts) > status_idx + 1 else ""
+                prefix = ",".join((*parts[:status_idx], "0"))
+                numeric_lines.append(
+                    f"{prefix},{tail}"
+                    if tail != "" or n_cols > status_idx + 1
+                    else prefix
+                )
+            filled = _fill_empty_csv_fields("\n".join(numeric_lines))
+            values = np.fromstring(filled.replace("\n", ","), dtype=float, sep=",")
+            if values.size == len(lines) * n_cols:
+                est_data = values.reshape(len(lines), n_cols)
+                status_arr = np.asarray(statuses, dtype=str)
+                parsed = True
+        if not parsed:
+            _, rows = _read_csv(path)
+            status_arr = np.asarray([r[status_idx] for r in rows], dtype=str)
+            num_rows = [
+                [
+                    0.0 if j == status_idx else (float(v) if v != "" else np.nan)
+                    for j, v in enumerate(r)
+                ]
+                for r in rows
+            ]
+            est_data = np.array(num_rows, dtype=float).reshape(-1, n_cols)
+    by_name = {
+        c: (status_arr if j == status_idx else est_data[:, j].copy())
+        for j, c in enumerate(header)
+    }
+    return header, by_name
+
+
 def read_session(log_dir: str | Path) -> Session:
     """Read a session log written by :class:`~myosuite_shadow.ShadowModel`.
 
@@ -749,9 +851,7 @@ def read_session(log_dir: str | Path) -> Session:
         record["model"]["nq"],
         record["model"]["nu"],
     )
-    header, rows = _read_csv(log_dir / ESTIMATES)
-    cols = list(zip(*rows)) if rows else [()] * len(header)
-    by_name = dict(zip(header, cols))
+    header, by_name = _read_estimates_csv(log_dir / ESTIMATES)
     columns = {
         c: (np.asarray(by_name[c], dtype=str) if c == "status" else _float(by_name[c]))
         for c in ESTIMATE_COLUMNS
@@ -778,11 +878,8 @@ def read_session(log_dir: str | Path) -> Session:
                 [_float(by_name[f"contact_{body}_{x}"]) for x in "xyz"]
             ).T.reshape(-1, 3)
 
-    in_header, in_rows = _read_csv(log_dir / INPUTS)
+    in_header, data = _read_numeric_csv(log_dir / INPUTS)
     k = len(INPUT_COLUMNS)
-    data = np.array(
-        [[float(v) if v != "" else np.nan for v in r] for r in in_rows], dtype=float
-    ).reshape(-1, len(in_header))
     input_columns = {c: data[:, i] for i, c in enumerate(INPUT_COLUMNS)}
     input_columns["evaluation_unix"] = (
         data[:, in_header.index("evaluation_unix")]

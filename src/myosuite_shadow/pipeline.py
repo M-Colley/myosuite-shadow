@@ -259,6 +259,7 @@ class ShadowModel:
         )
         if self.fatigue is not None and cfg.fatigue_params:
             _apply_fatigue_params(model, self.fatigue, cfg.fatigue_params)
+        self._cap = np.full(model.nu, np.inf)
         free = np.zeros(model.nv, dtype=bool)
         for j in np.flatnonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE):
             free[model.jnt_dofadr[j] : model.jnt_dofadr[j] + 6] = True
@@ -407,7 +408,7 @@ class ShadowModel:
     def _estimate(
         self, state: KinematicState, latest_time: float, start: float
     ) -> ShadowFrame:
-        pose = next(p for p in self._window if p.time == state.time)
+        pose = self._window[-1 - self.kinematics.lag]
         flags = Flag.NONE
         for p in self._window:
             flags |= p.flags
@@ -416,7 +417,8 @@ class ShadowModel:
         f = self.fatigue
         cap = None
         if f is not None and self.config.fatigue_limits_activation:
-            cap = np.full(self.model.nu, np.inf)
+            cap = self._cap
+            cap.fill(np.inf)
             cap[f.muscle_ids] = 1.0 - f.MF
         res = self.optimizer.solve(
             state.qpos, state.qvel, state.qacc, pose.external, max_activation=cap
