@@ -116,7 +116,7 @@ jobs:
           ../myosuite-study-support/myosuite/tests/test_streaming_kinematics.py
           ../myosuite-study-support/myosuite/tests/test_camera_reconstruction.py
       - run: uv run --no-sync python -m ruff check src tests benchmarks examples
-      - run: uv run --no-sync python -m ruff format --check src tests examples
+      - run: uv run --no-sync python -m ruff format --check src tests benchmarks examples
       - name: Benchmarks still run
         if: runner.os == 'Linux' && matrix.python == '3.12'
         run: |

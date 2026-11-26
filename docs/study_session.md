@@ -16,7 +16,7 @@ must represent the landmarks reported by the tracker.
 Use participant/reference body mass ratios or measured represented-segment mass:
 
 ```python
-from myosuite.biomechanics.calibration import scale_body_mass
+from myosuite_shadow.calibration import scale_body_mass
 
 # reference_mass is the nominal subject's documented whole-body mass.
 model = scale_body_mass(model, participant_mass=71.5, reference_mass=75.0,

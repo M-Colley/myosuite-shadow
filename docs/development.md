@@ -16,8 +16,8 @@ A sibling model checkout is not required. From `myosuite-shadow`:
 uv sync --frozen --extra test --python 3.12
 uv lock --check
 uv run --no-sync python -m pytest
-uv run --no-sync python -m ruff check src tests benchmarks
-uv run --no-sync python -m ruff format --check src tests
+uv run --no-sync python -m ruff check src tests benchmarks examples
+uv run --no-sync python -m ruff format --check src tests benchmarks examples
 ```
 
 For study use without test tools, select `--extra all` instead. Standard package
@@ -91,7 +91,7 @@ that remote CI has passed.
 
 ## Local verification baseline
 
-Shadow's final local suite passed **187 tests**, with Ruff lint/format and
+Shadow's final local suite passed **201 tests**, with Ruff lint/format and
 `uv lock --check` passing. The publication audit found no credentials, generated
 binaries, participant recordings or model weights among the candidate shadow
 changes. Full and targeted MyoSuite pre-commit hooks passed before the core commit
