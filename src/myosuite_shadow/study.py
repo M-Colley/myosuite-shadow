@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import mujoco
 import numpy as np
 
 from myosuite_shadow.flags import Flag
@@ -37,47 +38,69 @@ def validate_probes(session_dir: str | Path, probes: str | Path) -> dict[str, An
         if not required.issubset(reader.fieldnames or []):
             raise ValueError(f"probe CSV requires columns {sorted(required)}")
         rows = list(reader)
-    results = []
+    parsed_rows = []
     for row in rows:
         role = row["role"].strip()
         if role not in {"calibration", "validation"}:
             raise ValueError("probe role must be calibration or validation")
         t, measured = float(row["time"]), float(row["measured_torque"])
-        q = np.array([[float(row[f"qpos_{j}"]) for j in range(model.nq)]])
+        q = np.array([float(row[f"qpos_{j}"]) for j in range(model.nq)], dtype=float)
         if not np.isfinite([t, measured]).all() or measured == 0:
             raise ValueError("probe time and nonzero signed torque must be finite")
-        reason = "used_for_calibration" if role == "calibration" else None
-        prediction = float("nan")
-        if reason is None:
-            prediction = mvc_capacity(
-                session,
-                model,
-                row["joint"],
-                np.array([t]),
-                q,
-                direction=float(np.sign(measured)),
-                reject_flags=int(
-                    Flag.LOW_CONFIDENCE
-                    | Flag.MISSING
-                    | Flag.IK_RESIDUAL
-                    | Flag.GLITCH
-                    | Flag.NOT_SOLVED
-                    | Flag.INFERRED
-                ),
-            )[0]
-            if not np.isfinite(prediction):
-                reason = "tracking_gap_or_quality"
+        if not np.isfinite(q).all():
+            raise ValueError("probe postures must be finite")
+        joint = row["joint"]
+        jtype = int(model.joint(joint).type[0])
+        if jtype not in (
+            int(mujoco.mjtJoint.mjJNT_HINGE),
+            int(mujoco.mjtJoint.mjJNT_SLIDE),
+        ):
+            raise ValueError("probe joint must be a hinge or slide joint")
+        unit = "N" if jtype == int(mujoco.mjtJoint.mjJNT_SLIDE) else "Nm"
+        parsed_rows.append((role, t, measured, q, joint, unit))
+
+    reject_mask = int(
+        Flag.LOW_CONFIDENCE
+        | Flag.MISSING
+        | Flag.IK_RESIDUAL
+        | Flag.GLITCH
+        | Flag.NOT_SOLVED
+        | Flag.INFERRED
+    )
+    predictions = np.full(len(parsed_rows), np.nan)
+    batches: dict[tuple[str, float], list[int]] = {}
+    for idx, (role, _, measured, _, joint, _) in enumerate(parsed_rows):
+        if role == "validation":
+            batches.setdefault((joint, float(np.sign(measured))), []).append(idx)
+    for (joint, direction), indices in batches.items():
+        predictions[indices] = mvc_capacity(
+            session,
+            model,
+            joint,
+            np.array([parsed_rows[i][1] for i in indices], dtype=float),
+            np.stack([parsed_rows[i][3] for i in indices]),
+            direction=direction,
+            reject_flags=reject_mask,
+        )
+
+    results = []
+    for idx, (role, t, measured, q, joint, unit) in enumerate(parsed_rows):
+        prediction = float(predictions[idx])
+        if role == "calibration":
+            reason = "used_for_calibration"
+        elif not np.isfinite(prediction):
+            reason = "tracking_gap_or_quality"
+        else:
+            reason = None
         results.append(
             {
                 "time": t,
-                "joint": row["joint"],
+                "joint": joint,
                 "role": role,
-                "posture": q[0].tolist(),
-                "unit": "N" if model.joint(row["joint"]).type[0] == 2 else "Nm",
+                "posture": q.tolist(),
+                "unit": unit,
                 "measured_torque": measured,
-                "predicted_torque": float(prediction)
-                if np.isfinite(prediction)
-                else None,
+                "predicted_torque": prediction if np.isfinite(prediction) else None,
                 "exclusion": reason,
             }
         )

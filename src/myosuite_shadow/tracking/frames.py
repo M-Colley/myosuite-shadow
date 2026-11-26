@@ -44,6 +44,25 @@ def _finite(value: float, name: str) -> float:
 
 
 def _vectors(values: dict, size: int, name: str) -> dict[str, np.ndarray]:
+    if not values:
+        return {}
+    keys = list(values.keys())
+    if all(isinstance(key, str) and key for key in keys):
+        try:
+            mat = np.array(list(values.values()), dtype=float, copy=True)
+        except (TypeError, ValueError):
+            mat = None
+        if (
+            mat is not None
+            and mat.shape == (len(keys), size)
+            and np.isfinite(mat).all()
+        ):
+            if (
+                size != 4
+                or np.isclose(np.sqrt((mat * mat).sum(axis=1)), 1.0, atol=1e-3).all()
+            ):
+                mat.setflags(write=False)
+                return dict(zip(keys, mat))
     result = {}
     for key, value in values.items():
         vector = np.array(value, dtype=float, copy=True)
@@ -165,8 +184,7 @@ class TrackerFrame:
             if self.position_valid[n] and not self.position_tracked[n]
         )
 
-    def record(self) -> dict[str, Any]:
-        """Return a JSON-compatible record preserving source and quality fields."""
+    def _record_view(self, *, copy_metadata: bool) -> dict[str, Any]:
         return {
             "time_s": self.time_s,
             "source_id": self.source_id,
@@ -187,9 +205,15 @@ class TrackerFrame:
             "coordinate_frame": self.coordinate_frame,
             "transform_revision": self.transform_revision,
             "skeleton_revision": self.skeleton_revision,
-            "metadata": copy.deepcopy(self.metadata),
+            "metadata": copy.deepcopy(self.metadata)
+            if copy_metadata
+            else self.metadata,
             "schema_version": self.schema_version,
         }
+
+    def record(self) -> dict[str, Any]:
+        """Return a JSON-compatible record preserving source and quality fields."""
+        return self._record_view(copy_metadata=True)
 
     to_dict = record
 

@@ -434,3 +434,50 @@ def test_fidelity_fallback_cannot_enter_a_high_fidelity_protocol(setup):
             )
         )
     assert len(live.submissions) == 1
+
+
+def test_resumed_time_ordering_optional_inferred_landmarks_and_held_mass_parity(
+    setup,
+):
+    from myosuite.biomechanics.external_loads import held_mass_qfrc
+
+    model, solver, live, points = setup
+    live.shadow._last_pose = 1.05
+    with TrackedSession(live, solver) as session:
+        assert not session.submit(_frame(points, sequence=1, time_s=1.0))
+        assert session._last_rejection == "out_of_order"
+        assert session.submit(_frame(points, sequence=2, time_s=1.06))
+    live.shadow._last_pose = None
+
+    opt_solver = KeypointIK(
+        model,
+        [Keypoint("elbow", "fore"), Keypoint("hand", "hand", "site")],
+        IKConfig(min_keypoints=1, required_keypoints=("elbow",), min_confidence=0.5),
+    )
+    spy = _LiveSpy(model)
+    with TrackedSession(
+        spy,
+        opt_solver,
+        config=AcquisitionConfig(
+            held_mass_kg=2.5, load_site="hand", check_wallclock=False
+        ),
+    ) as session:
+        fr = TrackerFrame(
+            1.0,
+            "quest",
+            1,
+            "P07",
+            points,
+            confidence={"elbow": 0.9, "hand": 0.1},
+            position_tracked={"elbow": True, "hand": False},
+            capture_unix=1000.0,
+            time_kind="capture",
+            coordinate_frame="model_world",
+        )
+        assert session.submit(fr)
+    args, kwargs = spy.submissions[0]
+    assert not (kwargs["flags"] & Flag.INFERRED)
+    expected_ext = held_mass_qfrc(model, args[1], 2.5, site="hand")
+    np.testing.assert_allclose(args[2], expected_ext, atol=1e-12)
+    with pytest.raises(ValueError):
+        AcquisitionConfig(held_mass_kg=True, load_site="hand")
