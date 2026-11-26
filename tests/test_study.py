@@ -84,3 +84,11 @@ def test_independent_probes_exclude_calibration_and_tracking_gaps(
         mvc_capacity(
             read_session(log_dir), other, "joint", np.array([0.2]), np.zeros((1, 1))
         )
+    bad_probes = tmp_path / "bad_probes.csv"
+    bad_probes.write_text(
+        "time,joint,measured_torque,role,qpos_0\n"
+        "0.15,r_elbow_flex,40,calibration,nan\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="finite"):
+        validate_probes(log_dir, bad_probes)

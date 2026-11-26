@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import mujoco
 import numpy as np
 
 from myosuite_shadow.clock import now
@@ -43,13 +44,21 @@ class AcquisitionConfig:
     load_site: str | None = None
 
     def __post_init__(self) -> None:
+        for flag_name in ("allow_inferred", "check_wallclock", "require_mapped_time"):
+            if not isinstance(getattr(self, flag_name), bool):
+                raise ValueError(f"{flag_name} must be boolean")
         values = (
             self.max_prediction_s,
             self.max_age_s,
             self.max_clock_uncertainty_s,
             self.held_mass_kg,
         )
-        if not np.isfinite(values).all() or min(values) < 0 or self.max_age_s == 0:
+        if (
+            any(isinstance(v, bool) for v in values)
+            or not np.isfinite(values).all()
+            or min(values) < 0
+            or self.max_age_s == 0
+        ):
             raise ValueError("acquisition thresholds must be finite and nonnegative")
         if self.held_mass_kg and not self.load_site:
             raise ValueError("a held mass requires its model load_site")
@@ -83,17 +92,30 @@ class TrackedSession:
         ):
             raise ValueError("IK and live pipeline must share the calibrated model")
         if self.config.load_site is not None:
-            ik.model.site(self.config.load_site)
+            site_id = int(ik.model.site(self.config.load_site).id)
+        else:
+            site_id = -1
         self.registration = registration
         self.accepted, self.rejected = 0, 0
         self._identity: tuple[str, str] | None = None
         self._revision: tuple[int, int] | None = None
         self._last_sequence: int | None = None
-        self._last_time: float | None = None
+        self._last_time: float | None = getattr(live.shadow, "_last_pose", None)
         self._last_accepted_unix: float | None = None
         self._last_rejection: str | None = None
         self._registration_needed = False
         self._clock_record: str | None = None
+        self._last_clock: dict[str, Any] | None = None
+        self._names = frozenset(k.name for k in ik.keypoints)
+        self._required = frozenset(ik.config.required_keypoints) or self._names
+        if self.config.held_mass_kg:
+            self._load_data: mujoco.MjData | None = mujoco.MjData(ik.model)
+            self._load_site_id = site_id
+            self._load_body_id = int(ik.model.site_bodyid[site_id])
+            self._load_force = float(self.config.held_mass_kg) * ik.model.opt.gravity
+            self._zero_torque = np.zeros(3)
+        else:
+            self._load_data = None
         self._raw: RawFrameWriter | None = None
         self._files: list[Any] = []
         if raw_dir is None and live.shadow.log is not None:
@@ -105,7 +127,7 @@ class TrackedSession:
             quality_path = root / "tracking_quality.jsonl"
             try:
                 quality_recovery = repair_jsonl_tail(quality_path)
-                self._files = [open(quality_path, "a", encoding="utf-8")]
+                self._files = [open(quality_path, "a", encoding="utf-8", newline="\n")]
                 recoveries = [
                     {
                         "file": str(path),
@@ -228,13 +250,18 @@ class TrackedSession:
             self._revision = revision
         if self._registration_needed:
             reason = reason or "registration_required"
-        clock_record = json.dumps(clock, sort_keys=True)
         if reason is None and clock:
-            if self._clock_record is not None and self._clock_record != clock_record:
-                self.ik.reset()
-                self.live.reset_tracking()
-                self.live.mark("clock_mapping", mapping=clock)
-            self._clock_record = clock_record
+            if clock != self._last_clock:
+                clock_record = json.dumps(clock, sort_keys=True)
+                if (
+                    self._clock_record is not None
+                    and self._clock_record != clock_record
+                ):
+                    self.ik.reset()
+                    self.live.reset_tracking()
+                    self.live.mark("clock_mapping", mapping=clock)
+                self._clock_record = clock_record
+                self._last_clock = dict(clock)
         normalized = frame
         if reason is None:
             if self.registration is not None:
@@ -246,17 +273,16 @@ class TrackedSession:
                 reason = "registration_required"
         if reason == "registration_required":
             self._registration_needed = True
-        names = {k.name for k in self.ik.keypoints}
-        required = set(self.ik.config.required_keypoints) or names
-        missing = {
+        min_conf = self.ik.config.min_confidence
+        usable_names = {
             n
-            for n in required
-            if not normalized.position_valid.get(n, False)
-            or normalized.confidence.get(n, 0) < self.ik.config.min_confidence
+            for n in self._names
+            if normalized.position_valid.get(n, False)
+            and normalized.confidence.get(n, 0) >= min_conf
         }
-        if missing:
+        if self._required - usable_names:
             reason = reason or "required_landmarks"
-        inferred = names.intersection(normalized.inferred_joints)
+        inferred = usable_names.intersection(normalized.inferred_joints)
         if inferred and not self.config.allow_inferred:
             reason = reason or "inferred_landmarks"
         result = None
@@ -288,14 +314,20 @@ class TrackedSession:
                 self.live.mark("tracking_rejected", reason=reason)
             return False
         external = None
-        if self.config.held_mass_kg:
-            from myosuite.biomechanics.external_loads import held_mass_qfrc
-
-            external = held_mass_qfrc(
-                self.ik.model,
-                result.qpos,
-                self.config.held_mass_kg,
-                site=self.config.load_site,
+        if self._load_data is not None:
+            model, data = self.ik.model, self._load_data
+            data.qpos[:] = result.qpos
+            mujoco.mj_kinematics(model, data)
+            mujoco.mj_comPos(model, data)
+            external = np.zeros(model.nv)
+            mujoco.mj_applyFT(
+                model,
+                data,
+                self._load_force,
+                self._zero_torque,
+                data.site_xpos[self._load_site_id],
+                self._load_body_id,
+                external,
             )
         flags = result.flags | (
             Flag.INFERRED if inferred or frame.prediction_s > 0 else Flag.NONE

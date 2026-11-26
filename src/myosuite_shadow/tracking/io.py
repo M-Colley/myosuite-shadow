@@ -87,7 +87,8 @@ class RawFrameWriter:
 
     def write(self, frame: TrackerFrame) -> None:
         """Write and flush a versioned frame, including its original packet."""
-        self._file.write(json.dumps(frame.record(), allow_nan=False) + "\n")
+        payload = frame._record_view(copy_metadata=False)
+        self._file.write(json.dumps(payload, allow_nan=False) + "\n")
         self._file.flush()
 
     def close(self) -> None:
