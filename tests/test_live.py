@@ -199,3 +199,30 @@ def test_drain_waits_for_events_resets_and_poses_without_stopping(
     assert live.dropped == 0 and not session.columns["skipped"].any()
     assert session.events[0]["label"] == "busy"
     assert any(op["kind"] == "reset" for op in session.operations)
+
+
+def test_failed_worker_preserves_unclosed_checkpoint_and_closed_mark_fails(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    from myosuite_shadow import session_report
+
+    shadow = ShadowModel(elbow, ShadowModelConfig(window=5), log_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with LiveShadowModel(shadow) as live:
+            for k in range(6):
+                live.submit(k / 20, [1.0])
+            live.drain(timeout=5)
+            live.submit(0.5, [np.nan])
+            live._thread.join(5)
+    rep = session_report(tmp_path)
+    assert not rep["closed_cleanly"]
+    assert "live_summary" not in rep["events"]
+    with pytest.raises(RuntimeError, match="closed"):
+        shadow.mark("after_close")
+    with ShadowModel.resume(tmp_path, elbow) as resumed:
+        with pytest.raises(ValueError, match="unix"):
+            resumed.mark("bad_time", unix=True)
+        with pytest.raises(ValueError):
+            resumed.mark("bad_data", value=float("nan"))
+        resumed.push(0.5, [1.0])
+    assert session_report(tmp_path)["closed_cleanly"]

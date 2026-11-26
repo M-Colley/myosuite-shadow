@@ -127,14 +127,20 @@ class IKConfig:
             "step_tolerance",
         ):
             value = getattr(self, name)
-            if not np.isfinite(value) or value <= 0:
+            if isinstance(value, bool) or not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         for name in ("smoothing", "damping", "limit_margin"):
             value = getattr(self, name)
-            if not np.isfinite(value) or value < 0:
+            if isinstance(value, bool) or not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if not 0 <= self.min_confidence <= 1:
+        if (
+            isinstance(self.min_confidence, bool)
+            or not np.isfinite(self.min_confidence)
+            or not 0 <= self.min_confidence <= 1
+        ):
             raise ValueError("min_confidence must be in [0, 1]")
+        if not isinstance(self.couplings, bool):
+            raise ValueError("couplings must be boolean")
 
 
 @dataclass(frozen=True)
@@ -192,8 +198,15 @@ class KeypointIK:
         if qpos0 is None:
             qpos0 = model.key_qpos[0] if model.nkey else model.qpos0
         self._couplings = JointCouplings.from_model(model)
+        self._has_couplings = bool(
+            cfg.couplings
+            and (len(self._couplings.locked_qpos) or len(self._couplings.dep_qpos))
+        )
         q0 = np.array(qpos0, dtype=float)
-        project_joint_couplings(self._couplings, q0)
+        if q0.shape != (model.nq,) or not np.isfinite(q0).all():
+            raise ValueError(f"qpos0 must be finite with shape ({model.nq},)")
+        if self._has_couplings:
+            project_joint_couplings(self._couplings, q0)
         self.configuration = mink.Configuration(model, q0)
         self.tasks = {
             kp.name: mink.FrameTask(
@@ -215,9 +228,20 @@ class KeypointIK:
         scalar = np.isin(
             model.jnt_type, (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
         )
-        limited = scalar & (model.jnt_limited != 0)
+        coupled_qpos = (
+            np.concatenate((self._couplings.locked_qpos, self._couplings.dep_qpos))
+            if cfg.couplings
+            else np.empty(0, dtype=int)
+        )
+        limited = (
+            scalar
+            & (model.jnt_limited != 0)
+            & ~np.isin(model.jnt_qposadr, coupled_qpos)
+        )
         self._limit_adr = model.jnt_qposadr[limited]
         self._limit_range = model.jnt_range[limited]
+        span = np.maximum(self._limit_range[:, 1] - self._limit_range[:, 0], 0.0)
+        self._limit_margin = np.minimum(cfg.limit_margin, 0.05 * span)
         self._scalar_dofs = model.jnt_dofadr[scalar]
         self._root_dofs = model.jnt_dofadr[model.jnt_type == mujoco.mjtJoint.mjJNT_FREE]
         free_type = int(mujoco.mjtJoint.mjJNT_FREE)
@@ -241,7 +265,13 @@ class KeypointIK:
     def reset(self, qpos: np.ndarray | None = None) -> None:
         """Clear temporal priors after loss or a reference-space change."""
         if qpos is not None:
-            self.configuration.update(np.asarray(qpos, dtype=float))
+            q = np.array(qpos, dtype=float)
+            if q.shape != (self.model.nq,) or not np.isfinite(q).all():
+                raise ValueError(f"qpos must be finite with shape ({self.model.nq},)")
+            if self._has_couplings:
+                project_joint_couplings(self._couplings, q)
+            self.configuration.update(q)
+        self.posture.set_cost(_FIRST_FRAME_POSTURE)
         self.posture.set_target(self.configuration.q)
         self._prev, self._last_time = None, None
 
@@ -249,16 +279,22 @@ class KeypointIK:
         attr, frame_id = self._frame_lookup[kp.name]
         return getattr(self.configuration.data, attr)[frame_id]
 
+    def _dist_sq(
+        self, used_frames: list[tuple[str, int]], target_arr: np.ndarray
+    ) -> np.ndarray:
+        data = self.configuration.data
+        diff = np.empty((len(used_frames), 3), dtype=float)
+        for i, (attr, fid) in enumerate(used_frames):
+            diff[i] = getattr(data, attr)[fid]
+        diff -= target_arr
+        return (diff * diff).sum(axis=1)
+
     def _residuals(self, used: list[Keypoint], targets: dict[str, np.ndarray]) -> dict:
         if not used:
             return {}
-        data = self.configuration.data
-        diff = np.empty((len(used), 3), dtype=float)
-        for i, kp in enumerate(used):
-            attr, fid = self._frame_lookup[kp.name]
-            diff[i] = getattr(data, attr)[fid]
-        diff -= np.array([targets[kp.name] for kp in used], dtype=float)
-        norms = np.sqrt((diff * diff).sum(axis=1))
+        used_frames = [self._frame_lookup[kp.name] for kp in used]
+        target_arr = np.array([targets[kp.name] for kp in used], dtype=float)
+        norms = np.sqrt(self._dist_sq(used_frames, target_arr))
         return {kp.name: float(d) for kp, d in zip(used, norms)}
 
     def _step(self, tasks: list) -> float | None:
@@ -338,29 +374,40 @@ class KeypointIK:
         if self._prev is not None and time_s > self._prev[0]:
             self.posture.set_cost(cfg.smoothing / (time_s - self._prev[0]))
         tasks = [self.tasks[kp.name] for kp in used] + [self.posture]
+        used_frames = [self._frame_lookup[kp.name] for kp in used]
+        target_arr = np.array([targets[kp.name] for kp in used], dtype=float)
+        tol_sq = cfg.tolerance * cfg.tolerance
+        dist_sq: np.ndarray | None = None
         iterations = 0
         for iterations in range(1, cfg.max_iterations + 1):  # noqa: B007
             step = self._step(tasks)
             if step is None:
                 flags |= Flag.NOT_SOLVED
                 self.configuration.update(previous)
-                residual = self._residuals(used, targets)
+                norms = np.sqrt(self._dist_sq(used_frames, target_arr))
+                residual = {kp.name: float(d) for kp, d in zip(used, norms)}
                 return IKResult(previous.copy(), residual, flags, False, iterations)
-            if (
-                step < cfg.step_tolerance
-                or max(self._residuals(used, targets).values()) < cfg.tolerance
-            ):
+            if step < cfg.step_tolerance:
+                dist_sq = None
+                break
+            dist_sq = self._dist_sq(used_frames, target_arr)
+            if float(dist_sq.max()) < tol_sq:
                 break
         q = self.configuration.q.copy()
-        project_joint_couplings(self._couplings, q)
-        self.configuration.update(q)
-        residual = self._residuals(used, targets)
+        if self._has_couplings:
+            project_joint_couplings(self._couplings, q)
+            self.configuration.update(q)
+            dist_sq = None
+        if dist_sq is None:
+            dist_sq = self._dist_sq(used_frames, target_arr)
+        norms = np.sqrt(dist_sq)
+        residual = {kp.name: float(d) for kp, d in zip(used, norms)}
 
-        if max(residual.values()) > cfg.max_residual:
+        if float(norms.max()) > cfg.max_residual:
             flags |= Flag.IK_RESIDUAL
         x = q[self._limit_adr]
         lo, hi = self._limit_range.T
-        if np.any((x - lo < cfg.limit_margin) | (hi - x < cfg.limit_margin)):
+        if np.any((x - lo < self._limit_margin) | (hi - x < self._limit_margin)):
             flags |= Flag.JOINT_LIMIT
         if self._prev is not None and time_s > self._prev[0]:
             dq = np.zeros(self.model.nv)

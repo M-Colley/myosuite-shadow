@@ -97,3 +97,25 @@ def test_a_session_can_resume_twice(
     assert len(s.record["resumes"]) == 2 and len(s.input_time) == 320
     np.testing.assert_array_equal(s.input_time, np.arange(320) / 20)
     assert np.all(np.diff(s.time) > 0)
+
+
+def test_torn_csv_tails_are_ignored_by_read_session_and_report(
+    elbow: mujoco.MjModel, tmp_path: Path, config: ShadowModelConfig
+) -> None:
+    from myosuite_shadow import session_report
+    from myosuite_shadow.log import ESTIMATES, EVENTS
+
+    shadow = ShadowModel(elbow, config, log_dir=tmp_path)
+    for k in range(20):
+        shadow.push(*_pose(k))
+    shadow.mark("probe", trial=1)
+    _crash(shadow)
+    with open(tmp_path / ESTIMATES, "ab") as f:
+        f.write(b"1.0,17000")
+    with open(tmp_path / EVENTS, "ab") as f:
+        f.write(b'17000.0,0.95,torn,"{\xf0\x9f')
+    s = read_session(tmp_path)
+    assert len(s.input_time) == 20 and len(s.time) == 16
+    assert [e["label"] for e in s.events] == ["probe"]
+    rep = session_report(tmp_path, s)
+    assert not rep["closed_cleanly"]

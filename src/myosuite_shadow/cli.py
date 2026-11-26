@@ -113,6 +113,8 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
             load_motion_clip(args.clip, model.nq, model.nv), model
         )
         rate = clip.frequency_hz or args.rate
+        if not np.isfinite(rate) or rate <= 0:
+            raise ValueError("rate must be finite and positive")
         qpos, times = clip.qpos, np.arange(len(clip.qpos)) / rate
         base = ShadowModelConfig()
         noise = 0.5 if args.noise_deg is None else args.noise_deg
@@ -131,6 +133,8 @@ def _replay(args: argparse.Namespace) -> list[ShadowFrame]:
         for k in ("window", "lag", "fatigue")
         if getattr(args, k) is not None
     }
+    if args.window is not None and args.lag is None:
+        overrides["lag"] = None
     if args.contacts is not None:
         overrides["optimization"] = dataclasses.replace(
             base.optimization, contact_forces=args.contacts
@@ -215,7 +219,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         rep = session_report(args.session, thresholds=thresholds)
         if args.json is not None:
-            args.json.write_text(json.dumps(rep, indent=2), encoding="utf-8")
+            args.json.write_text(
+                json.dumps(rep, indent=2, allow_nan=False), encoding="utf-8"
+            )
         print(format_report(rep), end="")
         return
     if args.command == "sensitivity":

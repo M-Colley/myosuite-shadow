@@ -469,7 +469,9 @@ class SessionWriter:
         data: dict[str, Any],
     ) -> None:
         """Append one experimenter event."""
-        self._write(EVENTS, [unix, _num(session_time), label, json.dumps(data)])
+        self._write(
+            EVENTS, [unix, _num(session_time), label, json.dumps(data, allow_nan=False)]
+        )
 
     def write_checkpoint(self, state: dict[str, Any], *, closed: bool = False) -> None:
         """Make the data durable, then atomically replace the checkpoint."""
@@ -487,6 +489,11 @@ class SessionWriter:
     def close(self, state: dict[str, Any]) -> None:
         """Write a final checkpoint and close the files."""
         self.write_checkpoint(state, closed=True)
+        for f in self._files.values():
+            f.close()
+
+    def abort(self) -> None:
+        """Close log files after a crash while keeping the last checkpoint unclosed."""
         for f in self._files.values():
             f.close()
 
@@ -613,9 +620,17 @@ class Session:
         return model
 
 
+def _complete_csv_text(path: Path) -> str:
+    """Return newline-terminated CSV text, dropping a torn trailing row."""
+    raw = path.read_bytes()
+    raw = raw[: raw.rfind(b"\n") + 1]
+    if not raw:
+        raise ValueError(f"incomplete CSV header: {path.name}")
+    return raw.decode("utf-8")
+
+
 def _read_csv(path: Path) -> tuple[list[str], list[list[str]]]:
-    with open(path, newline="", encoding="utf-8") as f:
-        rows = [r for r in csv.reader(f) if r]
+    rows = [r for r in csv.reader(io.StringIO(_complete_csv_text(path))) if r]
     return rows[0], rows[1:]
 
 
@@ -768,7 +783,7 @@ def _fill_empty_csv_fields(text: str) -> str:
 
 
 def _read_numeric_csv(path: Path) -> tuple[list[str], np.ndarray]:
-    text = path.read_text(encoding="utf-8")
+    text = _complete_csv_text(path)
     header_line, _, body = text.partition("\n")
     header = next(csv.reader([header_line.rstrip("\r")]))
     n_cols = len(header)
@@ -787,7 +802,7 @@ def _read_numeric_csv(path: Path) -> tuple[list[str], np.ndarray]:
 
 
 def _read_estimates_csv(path: Path) -> tuple[list[str], dict[str, np.ndarray]]:
-    text = path.read_text(encoding="utf-8")
+    text = _complete_csv_text(path)
     header_line, _, body = text.partition("\n")
     header = next(csv.reader([header_line.rstrip("\r")]))
     n_cols = len(header)

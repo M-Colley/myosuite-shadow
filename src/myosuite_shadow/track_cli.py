@@ -13,7 +13,7 @@ import mujoco
 from myosuite_shadow.acquisition import AcquisitionConfig, TrackedSession
 from myosuite_shadow.ik import IKConfig, Keypoint, KeypointIK
 from myosuite_shadow.live import LiveShadowModel
-from myosuite_shadow.log import read_session
+from myosuite_shadow.log import RECORD
 from myosuite_shadow.pipeline import ShadowModel, ShadowModelConfig
 from myosuite_shadow.tracking import (
     ClockMapping,
@@ -91,13 +91,13 @@ def main(argv: list[str] | None = None) -> None:
             expected_person_id=quest.get("person_id"),
         )
     if args.resume:
-        recorded = read_session(args.log_dir)
+        recorded_meta = json.loads((args.log_dir / RECORD).read_text(encoding="utf-8"))
         if "shadow" in settings:
             with ShadowModel(
                 model, ShadowModelConfig.from_dict(settings["shadow"])
             ) as candidate:
                 expected = candidate.config
-            if expected != ShadowModelConfig.from_dict(recorded.record["config"]):
+            if expected != ShadowModelConfig.from_dict(recorded_meta["config"]):
                 parser.error(
                     "resume settings must match the recorded shadow configuration"
                 )
@@ -158,13 +158,15 @@ def main(argv: list[str] | None = None) -> None:
                     if args.max_frames is not None and count >= args.max_frames:
                         break
             except (TimeoutError, KeyboardInterrupt):
-                live.mark("acquisition_stopped", reason="timeout_or_operator")
+                if live.health["status"] != "failed":
+                    live.mark("acquisition_stopped", reason="timeout_or_operator")
             finally:
-                live.mark(
-                    "acquisition_summary",
-                    accepted=session.accepted,
-                    rejected=session.rejected,
-                )
+                if live.health["status"] != "failed":
+                    live.mark(
+                        "acquisition_summary",
+                        accepted=session.accepted,
+                        rejected=session.rejected,
+                    )
                 print(f"accepted {session.accepted}, rejected {session.rejected}")
 
 

@@ -248,7 +248,9 @@ class LiveShadowModel:
                     self.shadow.mark(
                         "live_summary", processed=self.processed, dropped=self.dropped
                     )
-                self.shadow.close()
+                    self.shadow.close()
+                else:
+                    self.shadow._abort()
                 self._closed = True
             if self._error is not None:
                 raise RuntimeError("the shadow-model worker failed") from self._error

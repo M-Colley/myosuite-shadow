@@ -10,6 +10,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
 from myosuite_shadow.clock import now
 
 from .frames import ClockMapping, fit_clock_mapping
@@ -37,33 +39,83 @@ def synchronize_quest_clock(
     Keep ``session_epoch`` constant for the whole study. The source clock ID
     comes from the replies; nonce/clock mismatch and uncertainty fail explicitly.
     """
-    if count < 3 or min(interval_s, timeout_s) <= 0:
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 3
+        or any(
+            isinstance(v, bool)
+            for v in (
+                session_epoch,
+                interval_s,
+                timeout_s,
+                validity_s,
+                max_rtt_s,
+                max_uncertainty_s,
+            )
+        )
+        or not np.isfinite(
+            [
+                session_epoch,
+                interval_s,
+                timeout_s,
+                validity_s,
+                max_rtt_s,
+                max_uncertainty_s,
+            ]
+        ).all()
+        or min(interval_s, timeout_s, validity_s, max_rtt_s, max_uncertainty_s) <= 0
+    ):
         raise ValueError(
-            "clock synchronization needs >=3 samples and positive intervals"
+            "clock synchronization needs >=3 samples and finite positive intervals"
         )
     stopped = stop_event or threading.Event()
     samples = []
+    sent_times: dict[int, float] = {}
     clock_id = None
     unix_anchor = (time.perf_counter() - session_epoch, now())
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(timeout_s)
         sock.connect((host, port))
         for i in range(count):
             if stopped.is_set():
                 raise _Cancelled()
             nonce = secrets.randbits(52)
+            while nonce in sent_times:
+                nonce = secrets.randbits(52)
             sent = time.perf_counter() - session_epoch
+            sent_times[nonce] = sent
             sock.send(f"shadow-clock-v1 {nonce}".encode("ascii"))
-            payload = json.loads(sock.recv(2048))
-            received = time.perf_counter() - session_epoch
-            if payload.get("nonce") != nonce:
-                raise ValueError("unexpected clock reply nonce")
-            if clock_id is not None and payload["clock_id"] != clock_id:
-                raise ValueError("sender clock changed during synchronization")
-            clock_id = payload["clock_id"]
-            samples.append((payload["source_time_s"], sent, received))
+            deadline = time.perf_counter() + timeout_s
+            while True:
+                if stopped.is_set():
+                    raise _Cancelled()
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                sock.settimeout(remaining)
+                try:
+                    raw = sock.recv(2048)
+                except TimeoutError:
+                    break
+                received = time.perf_counter() - session_epoch
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise ValueError("clock reply must be a JSON object")
+                reply_nonce = payload.get("nonce")
+                if isinstance(reply_nonce, bool) or reply_nonce not in sent_times:
+                    raise ValueError("unexpected clock reply nonce")
+                if clock_id is not None and payload["clock_id"] != clock_id:
+                    raise ValueError("sender clock changed during synchronization")
+                clock_id = payload["clock_id"]
+                samples.append(
+                    (payload["source_time_s"], sent_times.pop(reply_nonce), received)
+                )
+                if reply_nonce == nonce:
+                    break
             if i < count - 1 and stopped.wait(interval_s):
                 raise _Cancelled()
+    if not samples:
+        raise TimeoutError("no clock replies received from Quest sender")
     return fit_clock_mapping(
         samples,
         clock_id=clock_id,
@@ -98,7 +150,15 @@ class QuestClockSynchronizer:
         max_uncertainty_s: float = 0.01,
         sync_function: Callable[[], ClockMapping] | None = None,
     ) -> None:
-        if not 0 < refresh_s < validity_s or min(interval_s, timeout_s) <= 0:
+        if (
+            any(
+                isinstance(v, bool)
+                for v in (refresh_s, validity_s, interval_s, timeout_s)
+            )
+            or not np.isfinite([refresh_s, validity_s, interval_s, timeout_s]).all()
+            or not 0 < refresh_s < validity_s
+            or min(interval_s, timeout_s) <= 0
+        ):
             raise ValueError("clock refresh must be positive and shorter than validity")
         self._mapping = initial
         self._stop, self._refresh = threading.Event(), threading.Event()

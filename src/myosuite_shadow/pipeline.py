@@ -1,8 +1,8 @@
 """Shadow model: live muscle estimates beside an experiment.
 
 Chains MyoSuite's live joint kinematics
-(:class:`~myosuite.physics.streaming_kinematics.StreamingKinematics`), static
-optimization (:class:`~myosuite.physics.static_optimization.StaticOptimizer`) and
+(:class:`~myosuite.biomechanics.streaming_kinematics.StreamingKinematics`), static
+optimization (:class:`~myosuite.biomechanics.static_optimization.StaticOptimizer`) and
 3CC-r fatigue (:class:`~myosuite.core.muscle_conditions.CumulativeFatigue`)::
 
     meta = {"participant": "P07"}
@@ -457,9 +457,10 @@ class ShadowModel:
         mf = None
         if f is not None:
             load = res.activation[f.muscle_ids]
-            if self._fatigue_time is not None and state.time > self._fatigue_time:
-                f.compute_act(load, dt=state.time - self._fatigue_time)
-            self._fatigue_time, self._load = state.time, load.copy()
+            if np.isfinite(load).all():
+                if self._fatigue_time is not None and state.time > self._fatigue_time:
+                    f.compute_act(load, dt=state.time - self._fatigue_time)
+                self._fatigue_time, self._load = state.time, load.copy()
             mf = np.zeros(self.model.nu)
             mf[f.muscle_ids] = f.MF
         frame = ShadowFrame(
@@ -490,11 +491,21 @@ class ShadowModel:
             unix: Wall-clock time of the event (default now).
             **data: JSON-serialisable details.
         """
-        unix = now() if unix is None else float(unix)
+        if self._closed:
+            raise RuntimeError("the shadow model is closed")
+        if unix is None:
+            stamp = now()
+        elif isinstance(unix, bool) or not isinstance(unix, int | float):
+            raise ValueError("event unix timestamp must be a finite number")
+        else:
+            stamp = float(unix)
+        if not np.isfinite(stamp):
+            raise ValueError("event unix timestamp must be finite")
+        json.dumps(data, allow_nan=False)
         if self.log is not None:
-            self.log.write_event(unix, self._last_pose, label, data)
+            self.log.write_event(stamp, self._last_pose, label, data)
         for sink in self.sinks:
-            sink.event(unix, label, data)
+            sink.event(stamp, label, data)
 
     # ------------------------------------------------------------------
     # Checkpoints
@@ -615,6 +626,17 @@ class ShadowModel:
         self._closed = True
         if self.log is not None:
             self.log.close(self._state())
+            self.log = None
+        for sink in self.sinks:
+            sink.close()
+
+    def _abort(self) -> None:
+        """Close log files and sinks after a crash without marking closed."""
+        if self._closed:
+            return
+        self._closed = True
+        if self.log is not None:
+            self.log.abort()
             self.log = None
         for sink in self.sinks:
             sink.close()

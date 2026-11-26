@@ -266,3 +266,43 @@ def test_preflight_frame_validation_and_qp_failure_recovery(monkeypatch) -> None
     assert not result.usable and Flag.NOT_SOLVED in result.flags
     np.testing.assert_array_equal(solver.configuration.q, before)
     np.testing.assert_array_equal(result.qpos, before)
+
+
+def test_coupled_and_narrow_slide_limits_reset_cost_and_optional_couplings() -> None:
+    xml = (
+        '<mujoco><compiler angle="radian"/><worldbody><body name="upper">'
+        '<joint name="gh_ml" type="slide" axis="1 0 0" range="-0.0005 0.0035"/>'
+        '<joint name="hinge" axis="0 1 0" range="-1 1"/>'
+        '<joint name="coupled_slide" type="slide" axis="0 0 1" range="0 0.0016"/>'
+        '<geom size=".05"/><site name="tip" pos="0.2 0 0"/></body></worldbody>'
+        '<equality><joint joint1="coupled_slide" joint2="hinge" '
+        'polycoef="0.0002 0.001 0 0 0"/></equality></mujoco>'
+    )
+    model = mujoco.MjModel.from_xml_string(xml)
+    solver = ik.KeypointIK(
+        model,
+        [ik.Keypoint("tip", "tip", "site")],
+        ik.IKConfig(min_keypoints=1, smoothing=1e-2),
+    )
+    data = mujoco.MjData(model)
+    q_rest = model.qpos0.copy()
+    project_joint_couplings(JointCouplings.from_model(model), q_rest)
+    data.qpos[:] = q_rest
+    mujoco.mj_kinematics(model, data)
+    tip = data.site_xpos[0].copy()
+    r0 = solver.solve(0.0, {"tip": tip})
+    assert r0.usable and Flag.JOINT_LIMIT not in r0.flags
+    r1 = solver.solve(1 / 90, {"tip": tip})
+    assert r1.usable and solver.posture.cost[0] == pytest.approx(0.9)
+    solver.reset()
+    assert solver.posture.cost[0] == pytest.approx(1e-4)
+    with pytest.raises(ValueError, match="qpos"):
+        solver.reset(np.array([np.nan, 0.0, 0.0]))
+
+    uncoupled = ik.KeypointIK(
+        model,
+        [ik.Keypoint("tip", "tip", "site")],
+        ik.IKConfig(min_keypoints=1, couplings=False),
+        qpos0=np.array([0.0, 0.4, 0.001]),
+    )
+    assert uncoupled.configuration.q[2] == pytest.approx(0.001)

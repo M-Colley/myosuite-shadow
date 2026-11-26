@@ -326,7 +326,9 @@ def repeated_measures_correlation(
     import pandas as pd  # noqa: PLC0415
     import pingouin  # noqa: PLC0415
 
-    df = pd.DataFrame({"x": x, "y": y, "subject": subject}).dropna()
+    x_arr, y_arr = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    df = pd.DataFrame({"x": x_arr, "y": y_arr, "subject": subject})
+    df = df[np.isfinite(x_arr) & np.isfinite(y_arr)].dropna()
     res = pingouin.rm_corr(data=df, x="x", y="y", subject="subject")
     ci = res["CI95" if "CI95" in res else "CI95%"].iloc[0]  # renamed in pingouin 0.6
     return {

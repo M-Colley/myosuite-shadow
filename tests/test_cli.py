@@ -61,8 +61,20 @@ def test_session_replay_reproduces_and_overrides(
     np.testing.assert_array_equal(same.input_qpos, live.input_qpos)
     np.testing.assert_array_equal(same.activation, live.activation)
     np.testing.assert_array_equal(same.fatigue, live.fatigue)
-    main(["replay", "--session", str(tmp_path / "live"), "--window", "21"])
+    main(
+        [
+            "replay",
+            "--session",
+            str(tmp_path / "live"),
+            "--window",
+            "21",
+            "--log-dir",
+            str(tmp_path / "w21"),
+        ]
+    )
     assert "delay 111 ms" in capsys.readouterr().out
+    main(["replay", "--session", str(tmp_path / "w21"), "--window", "5"])
+    assert "delay 22 ms" in capsys.readouterr().out
 
 
 def test_session_replay_keeps_external_loads(
