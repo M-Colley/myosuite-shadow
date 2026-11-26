@@ -238,8 +238,13 @@ struct QuestBodySender::Impl {
         }
         const double sampleTime = seconds(locations.time);
         const double prediction = std::max(0.0, sampleTime - seconds(nativeNow()));
-        const char* actualName = !fidelity ? "unknown" :
-            actual.fidelity == XR_BODY_TRACKING_FIDELITY_HIGH_META ? "high" : "low";
+        const char* actualName = "unknown";
+        if (fidelity && locations.isActive) {
+            if (actual.fidelity == XR_BODY_TRACKING_FIDELITY_HIGH_META)
+                actualName = "high";
+            else if (actual.fidelity == XR_BODY_TRACKING_FIDELITY_LOW_META)
+                actualName = "low";
+        }
         std::ostringstream out;
         out << std::setprecision(17)
             << "{\"schema_version\":1,\"kind\":\"quest_body\",\"source_id\":\"quest\","

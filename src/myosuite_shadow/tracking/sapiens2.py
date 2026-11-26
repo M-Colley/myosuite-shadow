@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ from typing import Any
 import numpy as np
 from myosuite.biomechanics.camera import PinholeCamera, lift_depth, triangulate_point
 
-from .frames import TrackerFrame, _finite, _vectors
+from .frames import TrackerFrame, _clean_json, _finite, _vectors
 
 SAPIENS2_REVISION = "7e5bae88456ac418ff0e58e74106c9fe192055d4"
 _BODY = (
@@ -110,6 +111,7 @@ class Pose2D:
             object.__setattr__(
                 self, "capture_unix", _finite(self.capture_unix, "capture_unix")
             )
+        object.__setattr__(self, "metadata", _clean_json(self.metadata))
 
     def record(self) -> dict[str, Any]:
         """Return the observation and its original export record for auditing."""
@@ -119,9 +121,9 @@ class Pose2D:
             "person_id": self.person_id,
             "sequence": self.sequence,
             "positions_px": {n: p.tolist() for n, p in self.positions_px.items()},
-            "confidence": self.confidence,
+            "confidence": dict(self.confidence),
             "capture_unix": self.capture_unix,
-            "metadata": self.metadata,
+            "metadata": copy.deepcopy(self.metadata),
         }
 
 

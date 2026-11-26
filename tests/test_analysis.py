@@ -170,6 +170,10 @@ def test_agreement_statistics() -> None:
     assert (
         res["dof"] == len(subject) - 8 - 1 and res["ci_low"] < res["r"] < res["ci_high"]
     )
+    res_inf = repeated_measures_correlation(
+        np.append(xs, np.inf), np.append(ys, 5.0), np.append(subject, 7)
+    )
+    assert res_inf["dof"] == res["dof"] and res_inf["r"] == pytest.approx(res["r"])
 
 
 def test_residual_capacity_of_a_group(elbow: mujoco.MjModel, tmp_path: Path) -> None:

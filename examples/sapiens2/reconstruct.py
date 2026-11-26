@@ -200,6 +200,13 @@ def reconstruct(config_path: Path, out_dir: Path) -> dict[str, Any]:
         ):
             for sequence, group in enumerate(_groups(streams, max_skew)):
                 anchor = min(group, key=lambda view: (view.time_s, view.camera_id))
+                captures = [v.capture_unix for v in group]
+                group_capture = (
+                    anchor.capture_unix
+                    if all(t is not None for t in captures)
+                    and max(captures) - min(captures) <= max_skew
+                    else None
+                )
                 reason = None
                 if sum(bool(view.positions_px) for view in group) < 2:
                     reason = "fewer than two views with assigned participant landmarks"
@@ -211,7 +218,7 @@ def reconstruct(config_path: Path, out_dir: Path) -> dict[str, Any]:
                         {},
                         coordinate_frame=config.get("coordinate_frame", "camera_world"),
                         time_kind="capture",
-                        capture_unix=anchor.capture_unix,
+                        capture_unix=group_capture,
                         metadata={
                             "method": "calibrated_multiview",
                             "views": [view.record() for view in group],
@@ -240,7 +247,7 @@ def reconstruct(config_path: Path, out_dir: Path) -> dict[str, Any]:
                                 "coordinate_frame", "camera_world"
                             ),
                             time_kind="capture",
-                            capture_unix=anchor.capture_unix,
+                            capture_unix=group_capture,
                             metadata={"views": [view.record() for view in group]},
                         )
                 missing = sorted(set(cameras) - {view.camera_id for view in group})

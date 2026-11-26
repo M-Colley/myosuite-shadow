@@ -261,3 +261,48 @@ def test_invalid_flags_and_config_fail_before_writing_operations(
             shadow.push(0.0, [1.2], flags=True)
         assert (tmp_path / "operations.jsonl").read_bytes() == b""
     assert len(read_session(tmp_path).input_time) == 0
+
+
+def test_tracking_quality_handles_torn_utf8_and_nonfinite_activations_keep_fatigue(
+    elbow: mujoco.MjModel, tmp_path: Path
+) -> None:
+    import dataclasses
+
+    from myosuite_shadow import session_report
+
+    with ShadowModel(elbow, ShadowModelConfig(window=5), log_dir=tmp_path) as shadow:
+        for k in range(5):
+            shadow.push(k / 20, [1.0])
+        before_mf = shadow.fatigue.MF.copy()
+        orig_solve = shadow.optimizer.solve
+
+        def nan_solve(*args, **kwargs):
+            res = orig_solve(*args, **kwargs)
+            return dataclasses.replace(
+                res,
+                activation=np.full_like(res.activation, np.nan),
+                status="unsolved",
+            )
+
+        shadow.optimizer.solve = nan_solve
+        fr = shadow.push(5 / 20, [1.0])
+        assert np.isfinite(fr.fatigue).all()
+        np.testing.assert_allclose(shadow.fatigue.MF, before_mf)
+        shadow.optimizer.solve = orig_solve
+        fr_next = shadow.push(6 / 20, [1.0])
+        assert np.isfinite(fr_next.fatigue).all()
+
+    (tmp_path / "tracking_quality.jsonl").write_bytes(
+        b'{"accepted": true}\n'
+        b'{"accepted": false, "reason": "ik_quality"}\n'
+        b"{}\n"
+        b'{"accepted": false, "reason": []}\n'
+        b'{"reason":"\xf0\x9f'
+    )
+    rep = session_report(tmp_path)
+    assert rep["tracking"] == {
+        "frames": 2,
+        "rejected": 1,
+        "reasons": {"ik_quality": 1},
+        "unreadable_rows": 3,
+    }

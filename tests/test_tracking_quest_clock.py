@@ -149,3 +149,65 @@ def test_clock_service_protocol_uses_real_udp_and_nonce_bound_replies():
     mapped, unix = mapping.map(source_now)
     assert abs(mapped - time.perf_counter()) <= mapping.uncertainty_s
     assert unix is not None
+
+
+def test_clock_sync_tolerates_dropped_and_delayed_pings_and_rejects_spoofed_nonces():
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    server.settimeout(3)
+
+    def serve_flaky():
+        delayed = None
+        try:
+            for idx in range(5):
+                data, peer = server.recvfrom(1024)
+                _, nonce_text = data.decode("ascii").split()
+                nonce = int(nonce_text)
+                if idx == 0:
+                    continue  # drop first UDP ping
+                if idx == 1:
+                    delayed = (nonce, peer, time.perf_counter() + 500)
+                    continue  # delay reply until next ping arrives
+                if delayed is not None:
+                    d_nonce, d_peer, d_t = delayed
+                    server.sendto(
+                        json.dumps(
+                            {
+                                "nonce": d_nonce,
+                                "clock_id": "android_monotonic",
+                                "source_time_s": d_t,
+                            }
+                        ).encode(),
+                        d_peer,
+                    )
+                    delayed = None
+                server.sendto(
+                    json.dumps(
+                        {
+                            "nonce": nonce,
+                            "clock_id": "android_monotonic",
+                            "source_time_s": time.perf_counter() + 500,
+                        }
+                    ).encode(),
+                    peer,
+                )
+        finally:
+            server.close()
+
+    worker = threading.Thread(target=serve_flaky)
+    worker.start()
+    mapping = synchronize_quest_clock(
+        "127.0.0.1",
+        port=port,
+        count=5,
+        interval_s=0.35,
+        timeout_s=0.04,
+        validity_s=10,
+        max_rtt_s=0.5,
+        max_uncertainty_s=1.0,
+    )
+    worker.join(3)
+    assert mapping.clock_id == "android_monotonic"
+    with pytest.raises(ValueError, match="finite positive"):
+        synchronize_quest_clock("127.0.0.1", port=port, interval_s=float("nan"))

@@ -86,16 +86,25 @@ def _tracking_quality(log_dir: str | Path) -> dict[str, Any] | None:
         return None
     total, rejected, corrupt = 0, 0, 0
     reasons: dict[str, int] = {}
-    with path.open(encoding="utf-8") as stream:
-        for line in stream:
+    with path.open("rb") as stream:
+        for raw in stream:
             try:
-                row = json.loads(line)
-                total += 1
-                if not row["accepted"]:
-                    rejected += 1
+                row = json.loads(raw.decode("utf-8"))
+                if not isinstance(row, dict) or not isinstance(
+                    row.get("accepted"), bool
+                ):
+                    raise ValueError("invalid quality row")
+                accepted = row["accepted"]
+                reason = None
+                if not accepted:
                     reason = row["reason"]
+                    if not isinstance(reason, str) or not reason:
+                        raise ValueError("invalid rejection reason")
+                total += 1
+                if not accepted:
+                    rejected += 1
                     reasons[reason] = reasons.get(reason, 0) + 1
-            except (ValueError, KeyError, TypeError):
+            except (UnicodeDecodeError, ValueError, KeyError, TypeError):
                 corrupt += 1
     return {
         "frames": total,

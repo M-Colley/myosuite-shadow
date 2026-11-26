@@ -197,3 +197,15 @@ def test_grouping_consumes_fast_camera_once_and_anchors_times_monotonically():
     )
     assert [[v.camera_id for v in group] for group in groups] == [["A", "B"], ["A"]]
     assert [min(v.time_s for v in group) for group in groups] == [0, 0.001]
+
+
+def test_disagreeing_camera_capture_clocks_drop_fallback_capture_unix(tmp_path):
+    config, _ = _fixture(tmp_path)
+    side_unix = tmp_path / "side-capture.json"
+    values = json.loads(side_unix.read_text())
+    values["f0.png"] = 1005.0  # disagrees with front's 1000.0 by 5 s > max_skew
+    side_unix.write_text(json.dumps(values))
+    output = tmp_path / "skewed"
+    runpy.run_path(str(SCRIPT))["reconstruct"](config, output)
+    frames = list(read_frames(output / "frames.jsonl"))
+    assert not frames[0].positions and frames[0].capture_unix is None
