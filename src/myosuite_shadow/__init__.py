@@ -11,6 +11,7 @@ and quality reports, sensitivity replays and validation statistics afterwards.
 
 from myosuite_shadow.flags import Flag
 from myosuite_shadow.live import LiveShadowModel
+from myosuite_shadow.loads import inertial_external_qfrc
 from myosuite_shadow.log import Session, package_provenance, read_session
 from myosuite_shadow.motions import add_tracking_noise, reaching_motion
 from myosuite_shadow.pipeline import ShadowFrame, ShadowModel, ShadowModelConfig
@@ -28,6 +29,7 @@ __all__ = [
     "__version__",
     "add_tracking_noise",
     "format_report",
+    "inertial_external_qfrc",
     "package_provenance",
     "reaching_motion",
     "read_session",
