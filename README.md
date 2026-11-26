@@ -76,7 +76,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-from myosuite.biomechanics.calibration import (
+from myosuite_shadow.calibration import (
     posture_at, scale_body_mass, scale_strength, strength_from_mvc,
 )
 

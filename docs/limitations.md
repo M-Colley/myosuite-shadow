@@ -39,9 +39,10 @@ study's claims.
 
 - **Observability.** Required-landmark and residual gates reject selected failures;
   they do not guarantee that every modeled degree of freedom is constrained.
-  Axial rotations need appropriate landmarks, and body origins may not coincide
-  with tracked anatomical landmarks. Check the mapping and held-out poses for
-  each model/source configuration.
+  Axial rotations need appropriate landmarks, uncoupled shoulder-girdle degrees
+  of freedom require thorax, clavicle and scapula landmarks, and body origins
+  may not coincide with tracked anatomical landmarks. Check the mapping and
+  held-out poses for each model/source configuration.
 - **Quest body estimates.** API-valid positions can be inferred. Full-body output
   includes estimated legs, and actual fidelity can differ from requested fidelity.
   Keep source flags and evaluate accuracy by body region and task. Enabling

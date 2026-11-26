@@ -7,6 +7,7 @@ records should store the returned calibration object's ``record()``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import mujoco
 import numpy as np
@@ -19,7 +20,6 @@ from myosuite.biomechanics.calibration import (
     endurance_time,
     fit_fatigue_parameters,
     posture_at,
-    scale_body_mass,
 )
 from myosuite.biomechanics.calibration import (
     fatigue_params as _fatigue_params,
@@ -29,6 +29,9 @@ from myosuite.biomechanics.calibration import (
 )
 from myosuite.biomechanics.calibration import (
     max_joint_torque as _max_joint_torque,
+)
+from myosuite.biomechanics.calibration import (
+    scale_body_mass as _scale_body_mass,
 )
 from myosuite.biomechanics.calibration import (
     scale_strength as _scale_strength,
@@ -92,6 +95,12 @@ def scale_strength(
         dgf = ids[np.isin(out.actuator_user[ids, 0], (1.0, 2.0))]
         out.actuator_user[dgf, 1] *= scale
     return out
+
+
+def scale_body_mass(model: mujoco.MjModel, *args: Any, **kwargs: Any) -> mujoco.MjModel:
+    """Scale represented body masses, rejecting zeroed CompliantTendons models."""
+    _check_installed_dgf(model)
+    return _scale_body_mass(model, *args, **kwargs)
 
 
 def fatigue_params(

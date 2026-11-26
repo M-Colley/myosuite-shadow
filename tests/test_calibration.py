@@ -139,3 +139,5 @@ def test_dgf_user_force_scales_and_installed_compliant_tendons_are_rejected() ->
         strength_from_mvc(installed, np.array([0.5]), "elbow", 5.0)
     with pytest.raises(ValueError, match="CompliantTendons"):
         scale_strength(installed, 1.2)
+    with pytest.raises(ValueError, match="CompliantTendons"):
+        scale_body_mass(installed, represented_mass=1.5)
